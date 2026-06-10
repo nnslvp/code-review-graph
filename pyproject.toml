@@ -50,7 +50,7 @@ crg-daemon = "code_review_graph.daemon_cli:main"
 
 [project.optional-dependencies]
 embeddings = [
-    "sentence-transformers>=3.0.0,<4",
+    "sentence-transformers>=3.0.0,<6",
     "numpy>=1.26,<3",
 ]
 google-embeddings = [
