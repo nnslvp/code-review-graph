@@ -447,6 +447,34 @@ class TestRubyCalls:
         assert "json" in imps
 
 
+class TestRubyMixins:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(FIXTURES / "ruby_oop.rb")
+
+    def test_mixin_edges(self):
+        got = {(e.kind, e.target) for e in self.edges
+               if e.kind in ("INCLUDES", "EXTENDS", "PREPENDS")}
+        assert ("INCLUDES", "Comparable") in got
+        assert ("EXTENDS", "ClassMethods") in got
+        assert ("PREPENDS", "Logging") in got
+
+    def test_include_not_a_CALLS_target(self):
+        call_targets = {e.target.split("::")[-1].split(".")[-1]
+                        for e in self.edges if e.kind == "CALLS"}
+        assert "include" not in call_targets
+        assert "extend" not in call_targets
+        assert "prepend" not in call_targets
+
+    def test_mixins_in_class_extra(self):
+        user = next((n for n in self.nodes if n.kind == "Class" and n.name == "User"), None)
+        assert user is not None
+        mixins = user.extra.get("mixins", [])
+        assert "Comparable" in mixins
+        assert "ClassMethods" in mixins
+        assert "Logging" in mixins
+
+
 class TestPHPParsing:
     def setup_method(self):
         self.parser = CodeParser()

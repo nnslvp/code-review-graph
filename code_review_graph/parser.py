@@ -3437,10 +3437,16 @@ class CodeParser:
 
     _RUBY_REQUIRE_NAMES: frozenset[str] = frozenset({"require", "require_relative"})
 
-    # Populated by later tasks (3, 4, 9, 10) with mixin/attr/association/
-    # validation/scope/callback macro names.  Defined here as empty so the
-    # ordinary-call arm can reference it safely before those tasks land.
-    _ALL_RUBY_CLASS_MACROS: frozenset[str] = frozenset()
+    _RUBY_MIXIN_MACROS: dict[str, str] = {
+        "include": "INCLUDES",
+        "extend": "EXTENDS",
+        "prepend": "PREPENDS",
+    }
+
+    # Populated by later tasks (4, 9, 10) with attr/association/validation/
+    # scope/callback macro names.  Task 3 seeds it with mixin macros so the
+    # ordinary-call arm skips emitting a junk CALLS edge for include/extend/prepend.
+    _ALL_RUBY_CLASS_MACROS: frozenset[str] = frozenset(_RUBY_MIXIN_MACROS)
 
     def _ruby_call_parts(self, node):
         """Return (method_name, arguments_node, receiver_node) for a ruby ``call``."""
@@ -3458,6 +3464,52 @@ class CodeParser:
                     if s.type == "string_content":
                         return s.text.decode("utf-8", errors="replace")
         return None
+
+    def _emit_ruby_class_dsl(
+        self,
+        class_node,
+        name: str,
+        file_path: str,
+        enclosing_class: Optional[str],
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+        extra: dict,
+    ) -> None:
+        """Emit mixin edges (and later attr/association/etc.) for a Ruby class body.
+
+        Called from ``_extract_classes`` after INHERITS edges and before the
+        generic body recursion, so the edge source is the correctly-qualified
+        class even for nested module/class structures.
+
+        Tasks 4 and 10 will add more arms (attr_*, associations, validations,
+        scopes, callbacks) to this helper without changing its signature.
+        """
+        body = class_node.child_by_field_name("body")
+        if body is None:
+            return
+        src = self._qualify(name, file_path, enclosing_class)
+        for member in body.children:
+            if member.type != "call":
+                continue
+            mname, args, _ = self._ruby_call_parts(member)
+            if mname is None:
+                continue
+            line = member.start_point[0] + 1
+            # mixins: include / extend / prepend
+            if mname in self._RUBY_MIXIN_MACROS and args is not None:
+                kind = self._RUBY_MIXIN_MACROS[mname]
+                for arg in args.children:
+                    if arg.type in ("constant", "scope_resolution"):
+                        mod = arg.text.decode("utf-8", errors="replace")
+                        edges.append(EdgeInfo(
+                            kind=kind,
+                            source=src,
+                            target=mod,
+                            file_path=file_path,
+                            line=line,
+                            extra={"confidence_tier": "EXTRACTED"},
+                        ))
+                        extra.setdefault("mixins", []).append(mod)
 
     def _extract_ruby_constructs(
         self,
@@ -4456,6 +4508,13 @@ class CodeParser:
             self._emit_temporal_stub_fields(child, name, file_path, edges)
             # Kafka: emit CONSUMES/PRODUCES edges for Kafka field declarations
             self._emit_kafka_edges_from_class(child, name, file_path, edges)
+
+        # Ruby: emit mixin edges (include/extend/prepend) and later attr/association
+        # DSL macros. Must run AFTER INHERITS and BEFORE the body recursion so the
+        # edge source is the correctly-qualified class (enclosing_class in scope here).
+        if language == "ruby":
+            self._emit_ruby_class_dsl(child, name, file_path, enclosing_class,
+                                      nodes, edges, extra)
 
         # Recurse into class body
         self._extract_from_tree(
