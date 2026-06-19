@@ -1,7 +1,7 @@
 require 'json'
 require_relative '../lib/foo'
 
-CONFIG = { timeout: 30 }.freeze
+CONFIG = Settings.load("x")
 
 module Auth
   MAX_RETRIES = 3

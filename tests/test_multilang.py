@@ -505,6 +505,23 @@ class TestRubyConstants:
         assert "MAX_RETRIES" in consts
 
 
+class TestRubyConstantRHSCalls:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(FIXTURES / "ruby_oop.rb")
+
+    def test_constant_type_node_emitted(self):
+        consts = {n.name for n in self.nodes
+                  if n.kind == "Type" and n.extra.get("ruby_kind") == "constant"}
+        assert "CONFIG" in consts
+
+    def test_rhs_call_edge_captured(self):
+        call_targets = {e.target for e in self.edges if e.kind == "CALLS"}
+        assert any(t.endswith(".load") or t == "load" for t in call_targets), (
+            f"Expected a CALLS edge targeting 'load'; got: {call_targets}"
+        )
+
+
 class TestRubySingletonAndVisibility:
     def setup_method(self):
         self.parser = CodeParser()

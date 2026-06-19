@@ -3696,6 +3696,10 @@ class CodeParser:
                     target=self._qualify(cname, file_path, enclosing_class),
                     file_path=file_path, line=child.start_point[0] + 1,
                 ))
+                self._extract_from_tree(
+                    child, source, language, file_path, nodes, edges,
+                    enclosing_class, enclosing_func, import_map, defined_names, _depth + 1,
+                )
                 return True
             return False
         if node_type == "singleton_class":
@@ -3773,7 +3777,7 @@ class CodeParser:
             and name in self._ALL_RUBY_CLASS_MACROS
         )
         if not is_class_direct_macro:
-            call_name = self._get_call_name(child, language, source)
+            call_name = self._get_call_name(child, language, source) or name
             if call_name:
                 tgt = self._resolve_call_target(
                     call_name, file_path, language,
