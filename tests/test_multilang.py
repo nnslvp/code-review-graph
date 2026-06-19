@@ -430,6 +430,23 @@ class TestRubyInheritance:
         assert "Auth::Admin" in targets
 
 
+class TestRubyCalls:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(FIXTURES / "ruby_oop.rb")
+
+    def test_ordinary_calls_emit_CALLS(self):
+        targets = {e.target.split("::")[-1].split(".")[-1]
+                   for e in self.edges if e.kind == "CALLS"}
+        assert "save" in targets
+
+    def test_require_is_import_not_call(self):
+        call_targets = {e.target for e in self.edges if e.kind == "CALLS"}
+        assert "require" not in call_targets and "require_relative" not in call_targets
+        imps = {e.target for e in self.edges if e.kind == "IMPORTS_FROM"}
+        assert "json" in imps
+
+
 class TestPHPParsing:
     def setup_method(self):
         self.parser = CodeParser()

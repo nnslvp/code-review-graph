@@ -310,7 +310,7 @@ _IMPORT_TYPES: dict[str, list[str]] = {
     "c": ["preproc_include"],
     "cpp": ["preproc_include"],
     "csharp": ["using_directive"],
-    "ruby": ["call"],  # require/require_relative
+    "ruby": [],  # require/require_relative handled in _extract_ruby_constructs
     "r": ["call"],  # library(), require(), source() — filtered downstream
     "perl": ["use_statement", "require_expression"],
     "kotlin": ["import_header"],
@@ -362,7 +362,7 @@ _CALL_TYPES: dict[str, list[str]] = {
     "c": ["call_expression"],
     "cpp": ["call_expression"],
     "csharp": ["invocation_expression", "object_creation_expression"],
-    "ruby": ["call", "method_call"],
+    "ruby": [],  # all calls handled in _extract_ruby_constructs
     "r": ["call"],
     "perl": [
         "function_call_expression", "method_call_expression",
@@ -2267,6 +2267,16 @@ class CodeParser:
                 ):
                     continue
 
+            # --- Ruby-specific constructs ---
+            # Every call node in Ruby (require, require_relative, ordinary
+            # method calls) is owned by _extract_ruby_constructs so the
+            # generic import/call branches never fire for ruby call nodes.
+            if language == "ruby" and self._extract_ruby_constructs(
+                child, node_type, source, language, file_path, nodes, edges,
+                enclosing_class, enclosing_func, import_map, defined_names, _depth,
+            ):
+                continue
+
             # --- Elixir-specific constructs ---
             # Every top-level construct in Elixir is a ``call`` node:
             # defmodule, def/defp/defmacro, alias/import/require/use, and
@@ -3420,6 +3430,134 @@ class CodeParser:
             return False
 
         return False
+
+    # ------------------------------------------------------------------
+    # Ruby-specific helpers and dispatcher
+    # ------------------------------------------------------------------
+
+    _RUBY_REQUIRE_NAMES: frozenset[str] = frozenset({"require", "require_relative"})
+
+    # Populated by later tasks (3, 4, 9, 10) with mixin/attr/association/
+    # validation/scope/callback macro names.  Defined here as empty so the
+    # ordinary-call arm can reference it safely before those tasks land.
+    _ALL_RUBY_CLASS_MACROS: frozenset[str] = frozenset()
+
+    def _ruby_call_parts(self, node):
+        """Return (method_name, arguments_node, receiver_node) for a ruby ``call``."""
+        method = node.child_by_field_name("method")
+        name = method.text.decode("utf-8", errors="replace") if method is not None else None
+        args = node.child_by_field_name("arguments")
+        receiver = node.child_by_field_name("receiver")
+        return name, args, receiver
+
+    def _ruby_first_string_arg(self, args_node) -> Optional[str]:
+        """Return the text content of the first string argument in an argument list."""
+        for arg in args_node.children:
+            if arg.type == "string":
+                for s in arg.children:
+                    if s.type == "string_content":
+                        return s.text.decode("utf-8", errors="replace")
+        return None
+
+    def _extract_ruby_constructs(
+        self,
+        child,
+        node_type: str,
+        source: bytes,
+        language: str,
+        file_path: str,
+        nodes: list[NodeInfo],
+        edges: list[EdgeInfo],
+        enclosing_class: Optional[str],
+        enclosing_func: Optional[str],
+        import_map: Optional[dict[str, str]],
+        defined_names: Optional[set[str]],
+        _depth: int,
+    ) -> bool:
+        """Own all Ruby ``call`` nodes.
+
+        Returns True (caller should ``continue``) for ``call`` nodes only.
+        Returns False for all other node types so the generic class/method
+        paths handle them unchanged.
+        """
+        # body_statement direct children that are bare ``identifier`` nodes
+        # represent no-arg method calls (e.g. ``save`` with no parentheses).
+        # Ruby tree-sitter parses these as ``identifier``, not ``call``, so
+        # the call-type table never captures them.  Handle them here ONLY at
+        # the body_statement level to avoid noise from identifiers that appear
+        # in parameter lists, argument lists, or method name positions.
+        if node_type == "body_statement" and enclosing_func is not None:
+            for stmt in child.children:
+                if stmt.type == "identifier":
+                    bare_name = stmt.text.decode("utf-8", errors="replace")
+                    if bare_name and bare_name[0].islower():
+                        tgt = self._resolve_call_target(
+                            bare_name, file_path, language,
+                            import_map or {}, defined_names or set(),
+                        )
+                        edges.append(EdgeInfo(
+                            kind="CALLS",
+                            source=self._qualify(enclosing_func, file_path, enclosing_class),
+                            target=tgt,
+                            file_path=file_path,
+                            line=stmt.start_point[0] + 1,
+                        ))
+            return False  # do NOT claim; let generic path recurse into body
+
+        if node_type != "call":
+            return False
+
+        name, args, receiver = self._ruby_call_parts(child)
+        if name is None:
+            return False
+
+        # require / require_relative -> IMPORTS_FROM
+        if name in self._RUBY_REQUIRE_NAMES and args is not None:
+            target = self._ruby_first_string_arg(args)
+            if target:
+                resolved = self._resolve_module_to_file(target, file_path, language)
+                edges.append(EdgeInfo(
+                    kind="IMPORTS_FROM",
+                    source=file_path,
+                    target=resolved if resolved else target,
+                    file_path=file_path,
+                    line=child.start_point[0] + 1,
+                    extra={"require_kind": name},
+                ))
+            return True
+
+        # Ordinary call -> CALLS, unless it is a class-direct DSL macro
+        # (already handled by _emit_ruby_class_dsl in later tasks).
+        is_class_direct_macro = (
+            enclosing_func is None
+            and enclosing_class is not None
+            and name in self._ALL_RUBY_CLASS_MACROS
+        )
+        if not is_class_direct_macro:
+            call_name = self._get_call_name(child, language, source)
+            if call_name:
+                tgt = self._resolve_call_target(
+                    call_name, file_path, language,
+                    import_map or {}, defined_names or set(),
+                )
+                edges.append(EdgeInfo(
+                    kind="CALLS",
+                    source=self._qualify(enclosing_func, file_path, enclosing_class)
+                    if enclosing_func else file_path,
+                    target=tgt,
+                    file_path=file_path,
+                    line=child.start_point[0] + 1,
+                    extra={"receiver": receiver.text.decode("utf-8", "replace")}
+                    if receiver else {},
+                ))
+
+        # Recurse ONCE into this call's children (args + block) for nested calls.
+        # Per C-3: call _extract_from_tree(child, ...) NOT a loop over child.children.
+        self._extract_from_tree(
+            child, source, language, file_path, nodes, edges,
+            enclosing_class, enclosing_func, import_map, defined_names, _depth + 1,
+        )
+        return True
 
     # ------------------------------------------------------------------
     # Lua-specific helpers
