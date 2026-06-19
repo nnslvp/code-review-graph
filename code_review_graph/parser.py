@@ -4340,17 +4340,10 @@ class CodeParser:
             # Kafka: emit CONSUMES/PRODUCES edges for Kafka field declarations
             self._emit_kafka_edges_from_class(child, name, file_path, edges)
 
-        # Recurse into class body.
-        # Ruby modules are namespaces, not enclosing class scopes; classes
-        # defined inside a module are not "children" of that module in the
-        # inheritance graph.  Pass enclosing_class=None so that
-        # e.g. ``module Auth; class Admin < User`` produces a source of
-        # ``file::Admin`` (not ``file::Auth.Admin``) for the INHERITS edge.
-        ruby_module_body = language == "ruby" and child.type == "module"
+        # Recurse into class body
         self._extract_from_tree(
             child, source, language, file_path, nodes, edges,
-            enclosing_class=None if ruby_module_body else name,
-            enclosing_func=None,
+            enclosing_class=name, enclosing_func=None,
             import_map=import_map, defined_names=defined_names,
             _depth=_depth + 1,
         )

@@ -415,8 +415,10 @@ class TestRubyInheritance:
         self.nodes, self.edges = self.parser.parse_file(FIXTURES / "ruby_oop.rb")
 
     def test_simple_inheritance(self):
-        inh = {(e.source.split("::")[-1], e.target) for e in self.edges if e.kind == "INHERITS"}
-        assert ("Admin", "User") in inh
+        inh = {(e.source, e.target) for e in self.edges if e.kind == "INHERITS"}
+        # Admin is nested in module Auth, so its source is qualified
+        # (e.g. "<file>::Auth.Admin"); match by suffix, not a naive split.
+        assert any(s.endswith("Admin") and t == "User" for s, t in inh)
 
     def test_namespaced_classes_not_dropped(self):
         names = {n.name for n in self.nodes if n.kind == "Class"}
