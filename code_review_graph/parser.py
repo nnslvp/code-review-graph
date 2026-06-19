@@ -3464,10 +3464,32 @@ class CodeParser:
         "attr_writer": (False, True),
     }
 
+    _RAILS_ASSOCIATION_MACROS: frozenset[str] = frozenset(
+        {"has_many", "belongs_to", "has_one", "has_and_belongs_to_many"}
+    )
+    _RAILS_VALIDATION_MACROS: frozenset[str] = frozenset(
+        {"validates", "validate", "validates_presence_of", "validates_uniqueness_of"}
+    )
+    _RAILS_SCOPE_MACROS: frozenset[str] = frozenset({"scope"})
+    _RAILS_CALLBACK_MACROS: frozenset[str] = frozenset(
+        {"before_save", "after_save", "before_create", "after_create",
+         "before_update", "after_update", "before_destroy", "after_destroy",
+         "before_validation", "after_validation", "after_commit", "after_rollback",
+         "before_action", "after_action", "around_action"}
+    )
+
     # All class-body DSL macro names: the ordinary-call arm skips emitting a
     # junk CALLS edge for these (they are handled by _emit_ruby_class_dsl).
     _ALL_RUBY_CLASS_MACROS: frozenset[str] = frozenset(
-        list(_RUBY_MIXIN_MACROS) + list(_RUBY_ATTR_MACROS)
+        {"include", "extend", "prepend",
+         "attr_accessor", "attr_reader", "attr_writer",
+         "has_many", "belongs_to", "has_one", "has_and_belongs_to_many",
+         "validates", "validate", "validates_presence_of", "validates_uniqueness_of",
+         "scope",
+         "before_save", "after_save", "before_create", "after_create",
+         "before_update", "after_update", "before_destroy", "after_destroy",
+         "before_validation", "after_validation", "after_commit", "after_rollback",
+         "before_action", "after_action", "around_action"}
     )
 
     def _ruby_call_parts(self, node):
@@ -3486,6 +3508,37 @@ class CodeParser:
                     if s.type == "string_content":
                         return s.text.decode("utf-8", errors="replace")
         return None
+
+    @staticmethod
+    def _ruby_singularize(word: str) -> str:
+        if word.endswith("ies"):
+            return word[:-3] + "y"
+        if word.endswith(("ses", "xes", "zes", "ches", "shes")):
+            return word[:-2]
+        if word.endswith("s") and not word.endswith("ss"):
+            return word[:-1]
+        return word
+
+    @staticmethod
+    def _ruby_camelize(word: str) -> str:
+        return "".join(p.capitalize() for p in word.split("_"))
+
+    def _ruby_symbol_text(self, node) -> Optional[str]:
+        if node.type == "simple_symbol":
+            return node.text.decode("utf-8", errors="replace").lstrip(":")
+        return None
+
+    def _ruby_pair_options(self, args_node) -> dict:
+        opts: dict[str, str] = {}
+        for arg in args_node.children:
+            if arg.type == "pair":
+                k = arg.child_by_field_name("key")
+                v = arg.child_by_field_name("value")
+                if k is not None and v is not None:
+                    key = k.text.decode("utf-8", "replace").rstrip(":").lstrip(":")
+                    val = v.text.decode("utf-8", "replace").strip('"').lstrip(":")
+                    opts[key] = val
+        return opts
 
     def _emit_ruby_class_dsl(
         self,
@@ -3576,6 +3629,34 @@ class CodeParser:
                             file_path=file_path, line=line,
                         ))
                 continue
+            # associations -> ASSOCIATES edges
+            first_sym = next(
+                (self._ruby_symbol_text(a) for a in args.children if a.type == "simple_symbol"),
+                None,
+            ) if args else None
+            opts = self._ruby_pair_options(args) if args else {}
+            if mname in self._RAILS_ASSOCIATION_MACROS and first_sym:
+                if "class_name" in opts:
+                    target = opts["class_name"]
+                elif mname in ("has_many", "has_and_belongs_to_many"):
+                    target = self._ruby_camelize(self._ruby_singularize(first_sym))
+                else:
+                    target = self._ruby_camelize(first_sym)
+                edges.append(EdgeInfo(
+                    kind="ASSOCIATES", source=src, target=target,
+                    file_path=file_path, line=line,
+                    extra={"association": mname, "name": first_sym,
+                           "options": opts, "confidence_tier": "INFERRED"},
+                ))
+                extra.setdefault("associations", []).append(f"{mname} {target}")
+            elif mname in self._RAILS_VALIDATION_MACROS:
+                syms = [self._ruby_symbol_text(a) for a in args.children
+                        if a.type == "simple_symbol"] if args else []
+                extra.setdefault("rails_validations", []).extend(s for s in syms if s)
+            elif mname in self._RAILS_SCOPE_MACROS and first_sym:
+                extra.setdefault("rails_scopes", []).append(first_sym)
+            elif mname in self._RAILS_CALLBACK_MACROS and first_sym:
+                extra.setdefault("rails_callbacks", []).append(f"{mname}:{first_sym}")
 
     def _extract_ruby_constructs(
         self,

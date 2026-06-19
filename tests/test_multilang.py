@@ -558,6 +558,31 @@ class TestRailsRole:
         assert self._classes("rails_job.rb")["EmailJob"].extra.get("rails_role") == "job"
 
 
+class TestRailsDSL:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(FIXTURES / "rails_model.rb")
+        self.user = next(n for n in self.nodes if n.kind == "Class" and n.name == "User")
+
+    def test_associations(self):
+        assoc = {(e.extra.get("association"), e.target)
+                 for e in self.edges if e.kind == "ASSOCIATES"}
+        assert ("has_many", "Post") in assoc
+        assert ("has_one", "Profile") in assoc
+        assert ("belongs_to", "Org") in assoc            # class_name override
+        assert ("has_and_belongs_to_many", "Role") in assoc
+
+    def test_validations_scopes_callbacks(self):
+        assert any("email" in v for v in self.user.extra.get("rails_validations", []))
+        assert "active" in self.user.extra.get("rails_scopes", [])
+        assert "before_save:normalize_email" in self.user.extra.get("rails_callbacks", []) \
+            or "normalize_email" in str(self.user.extra.get("rails_callbacks"))
+
+    def test_no_junk_calls_for_macros(self):
+        ct = {e.target.split("::")[-1].split(".")[-1] for e in self.edges if e.kind == "CALLS"}
+        assert "has_many" not in ct and "validates" not in ct
+
+
 class TestPHPParsing:
     def setup_method(self):
         self.parser = CodeParser()
