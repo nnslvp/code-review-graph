@@ -632,7 +632,7 @@ class TestFlows:
             line_start=1,
             line_end=15,
             language="ruby",
-            extra={"rails_role": "job"},
+            extra={"rails_role": "job", "ruby_nonpublic_methods": ["helper_method"]},
         ))
         self.store.upsert_node(NodeInfo(
             kind="Function",

@@ -185,6 +185,8 @@ def _is_rails_entry(node: GraphNode, class_index: dict[str, dict]) -> bool:
     cls = class_index.get(node.parent_name)
     if cls is None:
         return False
+    if node.name in cls["nonpublic"]:
+        return False
     role = cls["role"]
     if role == "job":
         return node.name in _RAILS_JOB_METHODS
@@ -226,14 +228,10 @@ def detect_entry_points(
         if not include_tests and (node.is_test or _is_test_file(node.file_path)):
             continue
 
-        # Skip private/protected methods of Rails classes, and non-entry
-        # methods of job classes (only ``perform`` is an entry point for jobs).
+        # Skip private/protected methods of Rails classes.
         cls = ruby_class_index.get(node.parent_name) if node.parent_name else None
-        if cls:
-            if node.name in cls["nonpublic"]:
-                continue
-            if cls["role"] == "job" and node.name not in _RAILS_JOB_METHODS:
-                continue
+        if cls and node.name in cls["nonpublic"]:
+            continue
 
         is_entry = False
 
