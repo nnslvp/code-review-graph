@@ -541,6 +541,23 @@ class TestRubyRequireRelative:
         assert any(e.target.endswith("lib/foo.rb") for e in imp)
 
 
+class TestRailsRole:
+    def _classes(self, fixture):
+        parser = CodeParser()
+        nodes, _ = parser.parse_file(FIXTURES / fixture)
+        return {n.name: n for n in nodes if n.kind == "Class"}
+
+    def test_model_role(self):
+        assert self._classes("rails_model.rb")["User"].extra.get("rails_role") == "model"
+
+    def test_controller_role(self):
+        c = self._classes("rails_controller.rb")["UsersController"]
+        assert c.extra.get("rails_role") == "controller"
+
+    def test_job_role(self):
+        assert self._classes("rails_job.rb")["EmailJob"].extra.get("rails_role") == "job"
+
+
 class TestPHPParsing:
     def setup_method(self):
         self.parser = CodeParser()

@@ -474,6 +474,15 @@ _TEST_ANNOTATIONS = frozenset({
     "rstest", "rstest::rstest", "proptest",
 })
 
+# Rails base classes that imply a role for the subclass
+_RAILS_BASE_CLASSES: dict[str, str] = {
+    "ApplicationRecord": "model", "ActiveRecord::Base": "model",
+    "ApplicationController": "controller", "ActionController::Base": "controller",
+    "ActionController::API": "controller",
+    "ApplicationJob": "job", "ActiveJob::Base": "job",
+    "ApplicationMailer": "mailer", "ActionMailer::Base": "mailer",
+}
+
 # Spring stereotype annotations that mark classes as managed beans
 _SPRING_STEREOTYPE_ANNOTATIONS = frozenset({
     "Component", "Service", "Repository", "Controller", "RestController",
@@ -4549,6 +4558,10 @@ class CodeParser:
         if not name:
             return False
 
+        # Compute bases early so they can be used both for extra metadata and
+        # for INHERITS edge emission below (avoids calling _get_bases twice).
+        bases = self._get_bases(child, language, source)
+
         # Swift: detect the actual type keyword (class/struct/enum/actor/extension)
         # and store it in extra["swift_kind"] for richer downstream analysis.
         # Tree-sitter maps struct/enum/actor/extension all to class_declaration;
@@ -4584,6 +4597,25 @@ class CodeParser:
                 role = "workflow_interface" if is_wf else "activity_interface"
                 extra["temporal_role"] = role
 
+        # Ruby: detect Rails role from superclass or file-path convention
+        if language == "ruby":
+            role = None
+            for base in bases:
+                if base in _RAILS_BASE_CLASSES:
+                    role = _RAILS_BASE_CLASSES[base]
+                    break
+            if role is None:
+                if "/app/models/" in file_path or file_path.startswith("app/models/"):
+                    role = "model"
+                elif "/app/controllers/" in file_path or file_path.startswith("app/controllers/"):
+                    role = "controller"
+                elif "/app/jobs/" in file_path or file_path.startswith("app/jobs/"):
+                    role = "job"
+                elif "/app/mailers/" in file_path or file_path.startswith("app/mailers/"):
+                    role = "mailer"
+            if role:
+                extra["rails_role"] = role
+
         node = NodeInfo(
             kind="Class",
             name=name,
@@ -4606,7 +4638,6 @@ class CodeParser:
         ))
 
         # Inheritance edges
-        bases = self._get_bases(child, language, source)
         for base in bases:
             edges.append(EdgeInfo(
                 kind="INHERITS",
