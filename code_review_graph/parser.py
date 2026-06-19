@@ -5978,8 +5978,6 @@ class CodeParser:
             for child in node.children:
                 if child.type == "scope_resolution":
                     return child.text.decode("utf-8", errors="replace")
-                if child.type == "constant":
-                    return child.text.decode("utf-8", errors="replace")
 
         # Most languages use a 'name' child.
         # field_identifier covers C++ class member function names inside
