@@ -3480,30 +3480,6 @@ class CodeParser:
         Returns False for all other node types so the generic class/method
         paths handle them unchanged.
         """
-        # body_statement direct children that are bare ``identifier`` nodes
-        # represent no-arg method calls (e.g. ``save`` with no parentheses).
-        # Ruby tree-sitter parses these as ``identifier``, not ``call``, so
-        # the call-type table never captures them.  Handle them here ONLY at
-        # the body_statement level to avoid noise from identifiers that appear
-        # in parameter lists, argument lists, or method name positions.
-        if node_type == "body_statement" and enclosing_func is not None:
-            for stmt in child.children:
-                if stmt.type == "identifier":
-                    bare_name = stmt.text.decode("utf-8", errors="replace")
-                    if bare_name and bare_name[0].islower():
-                        tgt = self._resolve_call_target(
-                            bare_name, file_path, language,
-                            import_map or {}, defined_names or set(),
-                        )
-                        edges.append(EdgeInfo(
-                            kind="CALLS",
-                            source=self._qualify(enclosing_func, file_path, enclosing_class),
-                            target=tgt,
-                            file_path=file_path,
-                            line=stmt.start_point[0] + 1,
-                        ))
-            return False  # do NOT claim; let generic path recurse into body
-
         if node_type != "call":
             return False
 
@@ -3515,14 +3491,17 @@ class CodeParser:
         if name in self._RUBY_REQUIRE_NAMES and args is not None:
             target = self._ruby_first_string_arg(args)
             if target:
-                resolved = self._resolve_module_to_file(target, file_path, language)
+                resolved = None
+                if name == "require_relative":
+                    resolved = self._resolve_module_to_file(target, file_path, language)
                 edges.append(EdgeInfo(
                     kind="IMPORTS_FROM",
                     source=file_path,
                     target=resolved if resolved else target,
                     file_path=file_path,
                     line=child.start_point[0] + 1,
-                    extra={"require_kind": name},
+                    extra={"require_kind": name,
+                           "confidence_tier": "EXTRACTED" if resolved else "INFERRED"},
                 ))
             return True
 

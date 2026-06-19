@@ -438,7 +438,7 @@ class TestRubyCalls:
     def test_ordinary_calls_emit_CALLS(self):
         targets = {e.target.split("::")[-1].split(".")[-1]
                    for e in self.edges if e.kind == "CALLS"}
-        assert "save" in targets
+        assert "new" in targets
 
     def test_require_is_import_not_call(self):
         call_targets = {e.target for e in self.edges if e.kind == "CALLS"}
