@@ -331,42 +331,11 @@ def query_graph(
             for e in store.get_edges_by_source(qn):
                 if e.kind in ("INCLUDES", "EXTENDS", "PREPENDS"):
                     edges_out.append(edge_to_dict(e))
-                    mixin = store.get_node(e.target_qualified)
-                    if mixin:
-                        results.append(node_to_dict(mixin))
-                    else:
-                        results.append({"qualified_name": e.target_qualified,
-                                        "name": e.target_qualified})
-            if not results and node:
-                for kind in ("INCLUDES", "EXTENDS", "PREPENDS"):
-                    for e in store.search_edges_by_target_name(node.name, kind=kind):
-                        edges_out.append(edge_to_dict(e))
-                        mixin = store.get_node(e.target_qualified)
-                        if mixin:
-                            results.append(node_to_dict(mixin))
-                        else:
-                            results.append({"qualified_name": e.target_qualified,
-                                            "name": e.target_qualified})
 
         elif pattern == "associations_of":
             for e in store.get_edges_by_source(qn):
                 if e.kind == "ASSOCIATES":
                     edges_out.append(edge_to_dict(e))
-                    assoc = store.get_node(e.target_qualified)
-                    if assoc:
-                        results.append(node_to_dict(assoc))
-                    else:
-                        results.append({"qualified_name": e.target_qualified,
-                                        "name": e.target_qualified})
-            if not results and node:
-                for e in store.search_edges_by_target_name(node.name, kind="ASSOCIATES"):
-                    edges_out.append(edge_to_dict(e))
-                    assoc = store.get_node(e.target_qualified)
-                    if assoc:
-                        results.append(node_to_dict(assoc))
-                    else:
-                        results.append({"qualified_name": e.target_qualified,
-                                        "name": e.target_qualified})
 
         elif pattern == "file_summary":
             graph_paths = _resolve_graph_file_paths(store, root, [target])

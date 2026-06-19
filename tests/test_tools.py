@@ -265,6 +265,68 @@ class TestQueryGraphCallTargetFallbacks:
         }
 
 
+class TestQueryGraphMixinsOf:
+    """Regression tests for mixins_of and associations_of outgoing-only direction."""
+
+    def setup_method(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.root = Path(self.tmp_dir).resolve()
+        (self.root / ".git").mkdir()
+        (self.root / ".code-review-graph").mkdir()
+
+        self.model_file = str(self.root / "user.rb")
+        self.mixin_file = str(self.root / "comparable.rb")
+        self.db_path = str(self.root / ".code-review-graph" / "graph.db")
+        self._seed_data()
+
+    def teardown_method(self):
+        import shutil
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _seed_data(self):
+        with GraphStore(self.db_path) as store:
+            store.upsert_node(NodeInfo(
+                kind="Class", name="User", file_path=self.model_file,
+                line_start=1, line_end=10, language="ruby",
+            ))
+            store.upsert_node(NodeInfo(
+                kind="Class", name="Comparable", file_path=self.mixin_file,
+                line_start=1, line_end=5, language="ruby",
+            ))
+            store.upsert_edge(EdgeInfo(
+                kind="INCLUDES",
+                source=f"{self.model_file}::User",
+                target=f"{self.mixin_file}::Comparable",
+                file_path=self.model_file,
+                line=2,
+            ))
+            store.commit()
+
+    def test_mixins_of_returns_outgoing_includes_edge(self):
+        result = query_graph(
+            pattern="mixins_of",
+            target=f"{self.model_file}::User",
+            repo_root=str(self.root),
+        )
+
+        assert result["status"] == "ok"
+        assert len(result["edges"]) == 1
+        edge = result["edges"][0]
+        assert edge["kind"] == "INCLUDES"
+        assert edge["source"] == f"{self.model_file}::User"
+        assert edge["target"] == f"{self.mixin_file}::Comparable"
+
+    def test_mixins_of_does_not_return_inverted_edges(self):
+        result = query_graph(
+            pattern="mixins_of",
+            target=f"{self.mixin_file}::Comparable",
+            repo_root=str(self.root),
+        )
+
+        assert result["status"] == "ok"
+        assert result["edges"] == []
+
+
 def _seed_repo_relative_graph(root: Path) -> None:
     """Seed graph data with cwd-relative paths, as eval repos currently do."""
     graph_dir = root / ".code-review-graph"
