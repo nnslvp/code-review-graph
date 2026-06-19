@@ -5802,6 +5802,14 @@ class CodeParser:
                         break
                     current = current.parent
 
+        elif language == "ruby":
+            # require_relative is relative to the requiring file's directory.
+            cand = module if module.endswith(".rb") else module + ".rb"
+            probe = (Path(file_path).parent / cand).resolve()
+            if probe.is_file():
+                return str(probe)
+            return None
+
         return None
 
     def _find_dart_pubspec_root(

@@ -529,6 +529,18 @@ class TestRubySingletonAndVisibility:
         assert "secret" in nonpublic
 
 
+class TestRubyRequireRelative:
+    def test_require_relative_resolves(self, tmp_path):
+        (tmp_path / "lib").mkdir()
+        (tmp_path / "lib" / "foo.rb").write_text("module Foo; end\n")
+        main = tmp_path / "main.rb"
+        main.write_text("require_relative 'lib/foo'\nFoo\n")
+        parser = CodeParser()
+        nodes, edges = parser.parse_file(main)
+        imp = [e for e in edges if e.kind == "IMPORTS_FROM"]
+        assert any(e.target.endswith("lib/foo.rb") for e in imp)
+
+
 class TestPHPParsing:
     def setup_method(self):
         self.parser = CodeParser()
