@@ -3443,10 +3443,17 @@ class CodeParser:
         "prepend": "PREPENDS",
     }
 
-    # Populated by later tasks (4, 9, 10) with attr/association/validation/
-    # scope/callback macro names.  Task 3 seeds it with mixin macros so the
-    # ordinary-call arm skips emitting a junk CALLS edge for include/extend/prepend.
-    _ALL_RUBY_CLASS_MACROS: frozenset[str] = frozenset(_RUBY_MIXIN_MACROS)
+    _RUBY_ATTR_MACROS: dict[str, tuple[bool, bool]] = {
+        "attr_accessor": (True, True),
+        "attr_reader": (True, False),
+        "attr_writer": (False, True),
+    }
+
+    # All class-body DSL macro names: the ordinary-call arm skips emitting a
+    # junk CALLS edge for these (they are handled by _emit_ruby_class_dsl).
+    _ALL_RUBY_CLASS_MACROS: frozenset[str] = frozenset(
+        list(_RUBY_MIXIN_MACROS) + list(_RUBY_ATTR_MACROS)
+    )
 
     def _ruby_call_parts(self, node):
         """Return (method_name, arguments_node, receiver_node) for a ruby ``call``."""
@@ -3510,6 +3517,29 @@ class CodeParser:
                             extra={"confidence_tier": "EXTRACTED"},
                         ))
                         extra.setdefault("mixins", []).append(mod)
+                continue
+            # attr_accessor / attr_reader / attr_writer -> synthesized Function nodes
+            if mname in self._RUBY_ATTR_MACROS and args is not None:
+                want_get, want_set = self._RUBY_ATTR_MACROS[mname]
+                for arg in args.children:
+                    if arg.type != "simple_symbol":
+                        continue
+                    attr = arg.text.decode("utf-8", errors="replace").lstrip(":")
+                    for accessor, emit in ((attr, want_get), (attr + "=", want_set)):
+                        if not emit:
+                            continue
+                        nodes.append(NodeInfo(
+                            kind="Function", name=accessor, file_path=file_path,
+                            line_start=line, line_end=member.end_point[0] + 1,
+                            language="ruby", parent_name=name,
+                            extra={"ruby_kind": mname},
+                        ))
+                        edges.append(EdgeInfo(
+                            kind="CONTAINS", source=file_path,
+                            target=self._qualify(accessor, file_path, name),
+                            file_path=file_path, line=line,
+                        ))
+                continue
 
     def _extract_ruby_constructs(
         self,

@@ -475,6 +475,24 @@ class TestRubyMixins:
         assert "Logging" in mixins
 
 
+class TestRubyAttrs:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(FIXTURES / "ruby_oop.rb")
+
+    def test_accessor_creates_getter_and_setter(self):
+        fn = {n.name for n in self.nodes if n.kind == "Function"}
+        assert "name" in fn
+        assert "name=" in fn
+        assert "id" in fn
+        assert "token=" in fn
+
+    def test_attr_kind_metadata(self):
+        kinds = {n.name: n.extra.get("ruby_kind")
+                 for n in self.nodes if n.kind == "Function" and n.extra.get("ruby_kind")}
+        assert kinds.get("id") == "attr_reader"
+
+
 class TestPHPParsing:
     def setup_method(self):
         self.parser = CodeParser()
