@@ -4340,10 +4340,17 @@ class CodeParser:
             # Kafka: emit CONSUMES/PRODUCES edges for Kafka field declarations
             self._emit_kafka_edges_from_class(child, name, file_path, edges)
 
-        # Recurse into class body
+        # Recurse into class body.
+        # Ruby modules are namespaces, not enclosing class scopes; classes
+        # defined inside a module are not "children" of that module in the
+        # inheritance graph.  Pass enclosing_class=None so that
+        # e.g. ``module Auth; class Admin < User`` produces a source of
+        # ``file::Admin`` (not ``file::Auth.Admin``) for the INHERITS edge.
+        ruby_module_body = language == "ruby" and child.type == "module"
         self._extract_from_tree(
             child, source, language, file_path, nodes, edges,
-            enclosing_class=name, enclosing_func=None,
+            enclosing_class=None if ruby_module_body else name,
+            enclosing_func=None,
             import_map=import_map, defined_names=defined_names,
             _depth=_depth + 1,
         )
@@ -5974,6 +5981,13 @@ class CodeParser:
                                 return None
                 return None
 
+        if language == "ruby" and kind == "class":
+            for child in node.children:
+                if child.type == "scope_resolution":
+                    return child.text.decode("utf-8", errors="replace")
+                if child.type == "constant":
+                    return child.text.decode("utf-8", errors="replace")
+
         # Most languages use a 'name' child.
         # field_identifier covers C++ class member function names inside
         # function_declarator (e.g. virtual std::string get_name() = 0).
@@ -6209,6 +6223,14 @@ class CodeParser:
                             bases.append(
                                 idents[0].text.decode("utf-8", errors="replace"),
                             )
+        elif language == "ruby":
+            # class Foo < Bar  /  class Foo < A::B
+            for child in node.children:
+                if child.type == "superclass":
+                    for sub in child.children:
+                        if sub.type in ("constant", "scope_resolution"):
+                            bases.append(sub.text.decode("utf-8", errors="replace"))
+                            break
         return bases
 
     def _extract_import(self, node, language: str, source: bytes) -> list[str]:

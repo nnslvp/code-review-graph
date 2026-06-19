@@ -409,6 +409,24 @@ class TestRubyParsing:
         assert "initialize" in names or "find_by_id" in names or "save" in names
 
 
+class TestRubyInheritance:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(FIXTURES / "ruby_oop.rb")
+
+    def test_simple_inheritance(self):
+        inh = {(e.source.split("::")[-1], e.target) for e in self.edges if e.kind == "INHERITS"}
+        assert ("Admin", "User") in inh
+
+    def test_namespaced_classes_not_dropped(self):
+        names = {n.name for n in self.nodes if n.kind == "Class"}
+        assert "Admin::Audit" in names
+
+    def test_namespaced_base(self):
+        targets = {e.target for e in self.edges if e.kind == "INHERITS"}
+        assert "Auth::Admin" in targets
+
+
 class TestPHPParsing:
     def setup_method(self):
         self.parser = CodeParser()
