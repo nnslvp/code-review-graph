@@ -493,6 +493,18 @@ class TestRubyAttrs:
         assert kinds.get("id") == "attr_reader"
 
 
+class TestRubyConstants:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(FIXTURES / "ruby_oop.rb")
+
+    def test_constants_captured(self):
+        consts = {n.name for n in self.nodes
+                  if n.kind == "Type" and n.extra.get("ruby_kind") == "constant"}
+        assert "CONFIG" in consts
+        assert "MAX_RETRIES" in consts
+
+
 class TestPHPParsing:
     def setup_method(self):
         self.parser = CodeParser()

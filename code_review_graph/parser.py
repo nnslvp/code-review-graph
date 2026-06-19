@@ -3562,7 +3562,27 @@ class CodeParser:
         Returns False for all other node types so the generic class/method
         paths handle them unchanged.
         """
-        if node_type != "call":
+        if node_type not in ("call", "assignment", "singleton_class"):
+            return False
+        if node_type == "assignment":
+            lhs = child.child_by_field_name("left")
+            if lhs is not None and lhs.type in ("constant", "scope_resolution"):
+                cname = lhs.text.decode("utf-8", errors="replace")
+                nodes.append(NodeInfo(
+                    kind="Type", name=cname, file_path=file_path,
+                    line_start=child.start_point[0] + 1,
+                    line_end=child.end_point[0] + 1,
+                    language=language, parent_name=enclosing_class,
+                    extra={"ruby_kind": "constant"},
+                ))
+                edges.append(EdgeInfo(
+                    kind="CONTAINS", source=file_path,
+                    target=self._qualify(cname, file_path, enclosing_class),
+                    file_path=file_path, line=child.start_point[0] + 1,
+                ))
+                return True
+            return False
+        if node_type == "singleton_class":
             return False
 
         name, args, receiver = self._ruby_call_parts(child)
