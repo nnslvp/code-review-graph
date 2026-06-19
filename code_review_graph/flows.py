@@ -138,13 +138,59 @@ def _matches_entry_name(node: GraphNode) -> bool:
 
 
 _TEST_FILE_RE = re.compile(
-    r"([\\/]__tests__[\\/]|\.spec\.[jt]sx?$|\.test\.[jt]sx?$|[\\/]test_[^/\\]*\.py$)",
+    r"([\\/]__tests__[\\/]|\.spec\.[jt]sx?$|\.test\.[jt]sx?$|[\\/]test_[^/\\]*\.py$"
+    r"|_spec\.rb$|_test\.rb$)",
 )
 
 
 def _is_test_file(file_path: str) -> bool:
     """Return True if *file_path* looks like a test file."""
     return bool(_TEST_FILE_RE.search(file_path))
+
+
+_RAILS_JOB_METHODS: frozenset[str] = frozenset({"perform"})
+
+
+def _build_ruby_class_index(store: GraphStore) -> dict[str, dict]:
+    """Build an index of Ruby Rails class names to their role and nonpublic methods.
+
+    Returns a dict keyed by class simple name with values:
+        {"role": str, "nonpublic": set[str]}
+    Only Ruby classes with a ``rails_role`` extra field are included.
+    """
+    idx: dict[str, dict] = {}
+    for n in store.get_nodes_by_kind(["Class"]):
+        if n.language != "ruby":
+            continue
+        role = (n.extra or {}).get("rails_role")
+        if not role:
+            continue
+        nonpublic = set((n.extra or {}).get("ruby_nonpublic_methods") or [])
+        idx[n.name] = {"role": role, "nonpublic": nonpublic}
+    return idx
+
+
+def _is_rails_entry(node: GraphNode, class_index: dict[str, dict]) -> bool:
+    """Return True if *node* is a Rails framework entry point.
+
+    A node qualifies when:
+    - It is a Ruby Function node.
+    - Its parent class has a ``rails_role`` in the class index.
+    - The method is not listed in the class's nonpublic methods.
+    - The role-specific method filter matches (job → ``perform`` only;
+      controller/mailer → any public method).
+    """
+    if node.language != "ruby" or not node.parent_name:
+        return False
+    cls = class_index.get(node.parent_name)
+    if cls is None:
+        return False
+    role = cls["role"]
+    if role == "job":
+        return node.name in _RAILS_JOB_METHODS
+    if role in ("controller", "mailer"):
+        return True
+    return False
 
 
 def detect_entry_points(
@@ -167,6 +213,9 @@ def detect_entry_points(
     # ``<App />`` render) remain detectable as entry points.
     called_qnames = store.get_all_call_targets(include_file_sources=False)
 
+    # Build an index of Ruby Rails classes once (cheap no-op when none exist).
+    ruby_class_index = _build_ruby_class_index(store)
+
     # Scan all nodes for entry-point candidates.
     candidate_nodes = store.get_nodes_by_kind(["Function", "Test"])
 
@@ -176,6 +225,15 @@ def detect_entry_points(
     for node in candidate_nodes:
         if not include_tests and (node.is_test or _is_test_file(node.file_path)):
             continue
+
+        # Skip private/protected methods of Rails classes, and non-entry
+        # methods of job classes (only ``perform`` is an entry point for jobs).
+        cls = ruby_class_index.get(node.parent_name) if node.parent_name else None
+        if cls:
+            if node.name in cls["nonpublic"]:
+                continue
+            if cls["role"] == "job" and node.name not in _RAILS_JOB_METHODS:
+                continue
 
         is_entry = False
 
@@ -189,6 +247,10 @@ def detect_entry_points(
 
         # Conventional name match.
         if _matches_entry_name(node):
+            is_entry = True
+
+        # Rails framework entry point (controller action, job perform, mailer action).
+        if _is_rails_entry(node, ruby_class_index):
             is_entry = True
 
         if is_entry and node.qualified_name not in seen_qn:

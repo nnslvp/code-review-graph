@@ -583,6 +583,142 @@ class TestFlows:
         # Original flows unchanged.
         assert len(get_flows(self.store)) == initial_count
 
+    # ---------------------------------------------------------------
+    # Rails entry-points
+    # ---------------------------------------------------------------
+
+    def test_rails_controller_public_action_is_entry_point(self):
+        """Public controller actions are entry points; private methods are not."""
+        self.store.upsert_node(NodeInfo(
+            kind="Class",
+            name="UsersController",
+            file_path="app/controllers/users_controller.rb",
+            line_start=1,
+            line_end=20,
+            language="ruby",
+            extra={"rails_role": "controller", "ruby_nonpublic_methods": ["authenticate"]},
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Function",
+            name="index",
+            file_path="app/controllers/users_controller.rb",
+            line_start=2,
+            line_end=5,
+            language="ruby",
+            parent_name="UsersController",
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Function",
+            name="authenticate",
+            file_path="app/controllers/users_controller.rb",
+            line_start=7,
+            line_end=9,
+            language="ruby",
+            parent_name="UsersController",
+        ))
+        self.store.commit()
+
+        eps = detect_entry_points(self.store, include_tests=False)
+        ep_names = {e.name for e in eps}
+        assert "index" in ep_names
+        assert "authenticate" not in ep_names
+
+    def test_rails_job_perform_is_entry_point(self):
+        """perform method on a job class is an entry point; other methods are not."""
+        self.store.upsert_node(NodeInfo(
+            kind="Class",
+            name="MyJob",
+            file_path="app/jobs/my_job.rb",
+            line_start=1,
+            line_end=15,
+            language="ruby",
+            extra={"rails_role": "job"},
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Function",
+            name="perform",
+            file_path="app/jobs/my_job.rb",
+            line_start=2,
+            line_end=8,
+            language="ruby",
+            parent_name="MyJob",
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Function",
+            name="helper_method",
+            file_path="app/jobs/my_job.rb",
+            line_start=10,
+            line_end=13,
+            language="ruby",
+            parent_name="MyJob",
+        ))
+        self.store.commit()
+
+        eps = detect_entry_points(self.store, include_tests=False)
+        ep_names = {e.name for e in eps}
+        assert "perform" in ep_names
+        assert "helper_method" not in ep_names
+
+    def test_rails_mailer_action_is_entry_point(self):
+        """Public mailer action methods are entry points."""
+        self.store.upsert_node(NodeInfo(
+            kind="Class",
+            name="UserMailer",
+            file_path="app/mailers/user_mailer.rb",
+            line_start=1,
+            line_end=15,
+            language="ruby",
+            extra={"rails_role": "mailer"},
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Function",
+            name="welcome_email",
+            file_path="app/mailers/user_mailer.rb",
+            line_start=2,
+            line_end=8,
+            language="ruby",
+            parent_name="UserMailer",
+        ))
+        self.store.commit()
+
+        eps = detect_entry_points(self.store, include_tests=False)
+        ep_names = {e.name for e in eps}
+        assert "welcome_email" in ep_names
+
+    def test_ruby_spec_files_excluded_from_entry_points(self):
+        """Functions in _spec.rb and _test.rb files are excluded by default."""
+        self.store.upsert_node(NodeInfo(
+            kind="Function",
+            name="prod_method",
+            file_path="app/services/my_service.rb",
+            line_start=1,
+            line_end=5,
+            language="ruby",
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Function",
+            name="spec_method",
+            file_path="spec/services/my_service_spec.rb",
+            line_start=1,
+            line_end=5,
+            language="ruby",
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Function",
+            name="test_method",
+            file_path="test/services/my_service_test.rb",
+            line_start=1,
+            line_end=5,
+            language="ruby",
+        ))
+        self.store.commit()
+
+        eps = detect_entry_points(self.store, include_tests=False)
+        ep_files = {e.file_path for e in eps}
+        assert "app/services/my_service.rb" in ep_files
+        assert "spec/services/my_service_spec.rb" not in ep_files
+        assert "test/services/my_service_test.rb" not in ep_files
+
     def test_incremental_trace_flows_delete_is_atomic(self):
         """Regression test for #258: the DELETE loop in incremental_trace_flows
         must be wrapped in a transaction so a crash mid-loop cannot leave
