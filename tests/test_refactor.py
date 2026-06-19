@@ -899,3 +899,26 @@ class TestFindDeadCodeModuleScope:
         dead = find_dead_code(self.store)
         dead_names = {d["name"] for d in dead}
         assert "launch" not in dead_names
+
+
+def test_mixin_module_not_dead(tmp_path):
+    """A module used only via INCLUDES (Ruby include) is not flagged as dead code."""
+    from code_review_graph.parser import EdgeInfo, NodeInfo
+    from code_review_graph.refactor import find_dead_code
+
+    store = GraphStore(str(tmp_path / "g.db"))
+    store.upsert_node(NodeInfo(
+        kind="Class", name="Comparable", file_path="a.rb",
+        line_start=1, line_end=2, language="ruby",
+    ))
+    store.upsert_node(NodeInfo(
+        kind="Class", name="User", file_path="b.rb",
+        line_start=1, line_end=2, language="ruby",
+    ))
+    store.upsert_edge(EdgeInfo(
+        kind="INCLUDES", source="b.rb::User",
+        target="Comparable", file_path="b.rb", line=1,
+    ))
+    store.commit()
+    dead = {d["name"] for d in find_dead_code(store)}
+    assert "Comparable" not in dead

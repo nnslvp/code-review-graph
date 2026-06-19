@@ -503,16 +503,23 @@ def find_dead_code(
         if node.kind == "Class" and not any(e.kind == "INHERITS" for e in incoming):
             bare_inh = store.search_edges_by_target_name(node.name, kind="INHERITS")
             incoming = incoming + bare_inh
+        # Check mixin kinds -- modules included/extended/prepended or associated are not dead.
+        _mixin_kinds = ("INCLUDES", "EXTENDS", "PREPENDS", "ASSOCIATES")
+        if not any(e.kind in _mixin_kinds for e in incoming):
+            for _mk in _mixin_kinds:
+                bare_mx = store.search_edges_by_target_name(node.name, kind=_mk)
+                incoming = incoming + bare_mx
         has_callers = any(e.kind == "CALLS" for e in incoming)
         has_test_refs = any(e.kind == "TESTED_BY" for e in incoming)
         has_importers = any(e.kind == "IMPORTS_FROM" for e in incoming)
         has_references = any(e.kind == "REFERENCES" for e in incoming)
         has_subclasses = any(e.kind == "INHERITS" for e in incoming)
+        has_mixin_refs = any(e.kind in _mixin_kinds for e in incoming)
 
         # For classes with no direct references, check if any member has callers.
         no_refs = not (
             has_callers or has_test_refs or has_importers
-            or has_references or has_subclasses
+            or has_references or has_subclasses or has_mixin_refs
         )
         if node.kind == "Class" and no_refs:
             member_prefix = node.qualified_name + "."
@@ -528,7 +535,7 @@ def find_dead_code(
 
         if not (
             has_callers or has_test_refs or has_importers
-            or has_references or has_subclasses
+            or has_references or has_subclasses or has_mixin_refs
         ):
             # Check if this is a method override where the base class method
             # has callers (polymorphic dispatch: callers of Base.method()

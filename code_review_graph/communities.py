@@ -49,6 +49,10 @@ EDGE_WEIGHTS: dict[str, float] = {
     "CONTAINS": 0.3,
     "TESTED_BY": 0.4,
     "DEPENDS_ON": 0.6,
+    "INCLUDES": 0.8,
+    "EXTENDS": 0.8,
+    "PREPENDS": 0.8,
+    "ASSOCIATES": 0.6,
 }
 
 # Common words to filter when generating community names
