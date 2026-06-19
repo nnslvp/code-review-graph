@@ -569,7 +569,8 @@ class TestRailsDSL:
                  for e in self.edges if e.kind == "ASSOCIATES"}
         assert ("has_many", "Post") in assoc
         assert ("has_one", "Profile") in assoc
-        assert ("belongs_to", "Org") in assoc            # class_name override
+        assert ("belongs_to", "Org") in assoc            # class_name override (double-quoted)
+        assert ("belongs_to", "Account") in assoc        # class_name override (single-quoted)
         assert ("has_and_belongs_to_many", "Role") in assoc
 
     def test_validations_scopes_callbacks(self):

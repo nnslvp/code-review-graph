@@ -2,6 +2,7 @@ class User < ApplicationRecord
   has_many :posts, dependent: :destroy
   has_one :profile
   belongs_to :account, class_name: "Org"
+  belongs_to :owner, class_name: 'Account'
   has_and_belongs_to_many :roles
   validates :email, presence: true
   scope :active, -> { where(active: true) }

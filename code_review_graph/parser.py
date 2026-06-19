@@ -3480,16 +3480,15 @@ class CodeParser:
 
     # All class-body DSL macro names: the ordinary-call arm skips emitting a
     # junk CALLS edge for these (they are handled by _emit_ruby_class_dsl).
-    _ALL_RUBY_CLASS_MACROS: frozenset[str] = frozenset(
-        {"include", "extend", "prepend",
-         "attr_accessor", "attr_reader", "attr_writer",
-         "has_many", "belongs_to", "has_one", "has_and_belongs_to_many",
-         "validates", "validate", "validates_presence_of", "validates_uniqueness_of",
-         "scope",
-         "before_save", "after_save", "before_create", "after_create",
-         "before_update", "after_update", "before_destroy", "after_destroy",
-         "before_validation", "after_validation", "after_commit", "after_rollback",
-         "before_action", "after_action", "around_action"}
+    # Derived from _RUBY_MIXIN_MACROS, _RUBY_ATTR_MACROS, _RAILS_ASSOCIATION_MACROS,
+    # _RAILS_VALIDATION_MACROS, _RAILS_SCOPE_MACROS, and _RAILS_CALLBACK_MACROS.
+    _ALL_RUBY_CLASS_MACROS: frozenset[str] = (
+        frozenset(_RUBY_MIXIN_MACROS)
+        | frozenset(_RUBY_ATTR_MACROS)
+        | _RAILS_ASSOCIATION_MACROS
+        | _RAILS_VALIDATION_MACROS
+        | _RAILS_SCOPE_MACROS
+        | _RAILS_CALLBACK_MACROS
     )
 
     def _ruby_call_parts(self, node):
@@ -3536,7 +3535,7 @@ class CodeParser:
                 v = arg.child_by_field_name("value")
                 if k is not None and v is not None:
                     key = k.text.decode("utf-8", "replace").rstrip(":").lstrip(":")
-                    val = v.text.decode("utf-8", "replace").strip('"').lstrip(":")
+                    val = v.text.decode("utf-8", "replace").strip('"\'').lstrip(":")
                     opts[key] = val
         return opts
 
