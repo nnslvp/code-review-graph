@@ -505,6 +505,30 @@ class TestRubyConstants:
         assert "MAX_RETRIES" in consts
 
 
+class TestRubySingletonAndVisibility:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(FIXTURES / "ruby_oop.rb")
+
+    def test_singleton_class_methods(self):
+        sing = {n.name for n in self.nodes
+                if n.kind == "Function" and n.extra.get("ruby_singleton")}
+        assert "from_token" in sing
+        assert "build" in sing
+
+    def test_setter_named_with_equals(self):
+        fn = {n.name for n in self.nodes if n.kind == "Function"}
+        assert "name=" in fn
+
+    def test_visibility(self):
+        user_class = next(
+            (n for n in self.nodes if n.kind == "Class" and n.name == "User"), None
+        )
+        assert user_class is not None
+        nonpublic = user_class.extra.get("ruby_nonpublic_methods", [])
+        assert "secret" in nonpublic
+
+
 class TestPHPParsing:
     def setup_method(self):
         self.parser = CodeParser()

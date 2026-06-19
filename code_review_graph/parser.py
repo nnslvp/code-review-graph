@@ -3495,7 +3495,28 @@ class CodeParser:
         if body is None:
             return
         src = self._qualify(name, file_path, enclosing_class)
+        # Visibility tracking: scan body children in order; a bare identifier
+        # whose text is public/private/protected flips the current visibility.
+        # Methods appearing after a private/protected marker are collected into
+        # ruby_nonpublic_methods on the class node's extra dict.
+        _vis_markers = frozenset(("public", "private", "protected"))
+        current_vis = "public"
         for member in body.children:
+            if member.type == "identifier":
+                t = member.text.decode("utf-8", errors="replace")
+                if t in _vis_markers:
+                    current_vis = t
+                continue
+            if member.type in ("method", "singleton_method"):
+                if current_vis != "public":
+                    mname_node = member.child_by_field_name("name")
+                    if mname_node is not None:
+                        # For setter nodes (def x=) the "name" field points to the
+                        # setter wrapper; use _get_name to get the canonical "x=" form.
+                        mtext = self._get_name(member, "ruby", "function") or ""
+                        if mtext:
+                            extra.setdefault("ruby_nonpublic_methods", []).append(mtext)
+                continue
             if member.type != "call":
                 continue
             mname, args, _ = self._ruby_call_parts(member)
@@ -3556,11 +3577,11 @@ class CodeParser:
         defined_names: Optional[set[str]],
         _depth: int,
     ) -> bool:
-        """Own all Ruby ``call`` nodes.
+        """Own all Ruby ``call``, ``assignment``, and ``singleton_class`` nodes.
 
-        Returns True (caller should ``continue``) for ``call`` nodes only.
-        Returns False for all other node types so the generic class/method
-        paths handle them unchanged.
+        Returns True (caller should ``continue``) when the node is fully
+        handled here.  Returns False for all other node types so the generic
+        class/method paths handle them unchanged.
         """
         if node_type not in ("call", "assignment", "singleton_class"):
             return False
@@ -3583,7 +3604,29 @@ class CodeParser:
                 return True
             return False
         if node_type == "singleton_class":
-            return False
+            body = child.child_by_field_name("body")
+            if body is not None:
+                for member in body.children:
+                    if member.type == "method":
+                        mname = self._get_name(member, language, "function")
+                        if mname:
+                            nodes.append(NodeInfo(
+                                kind="Function", name=mname, file_path=file_path,
+                                line_start=member.start_point[0] + 1,
+                                line_end=member.end_point[0] + 1,
+                                language=language, parent_name=enclosing_class,
+                                extra={"ruby_singleton": True},
+                            ))
+                            edges.append(EdgeInfo(
+                                kind="CONTAINS", source=file_path,
+                                target=self._qualify(mname, file_path, enclosing_class),
+                                file_path=file_path, line=member.start_point[0] + 1,
+                            ))
+                            self._extract_from_tree(
+                                member, source, language, file_path, nodes, edges,
+                                enclosing_class, mname, import_map, defined_names, _depth + 1,
+                            )
+            return True
 
         name, args, receiver = self._ruby_call_parts(child)
         if name is None:
@@ -4659,6 +4702,8 @@ class CodeParser:
 
         # Java: detect Temporal method-level annotations and Kafka listeners
         method_extra: dict = {}
+        if language == "ruby" and child.type == "singleton_method":
+            method_extra["ruby_singleton"] = True
         if language == "java" and deco_list:
             temporal_method_annots = [
                 a for a in deco_list if a in _TEMPORAL_METHOD_ANNOTATIONS
@@ -6204,6 +6249,12 @@ class CodeParser:
             for child in node.children:
                 if child.type == "scope_resolution":
                     return child.text.decode("utf-8", errors="replace")
+        if language == "ruby" and kind == "function":
+            for child in node.children:
+                if child.type == "setter":
+                    for s in child.children:
+                        if s.type == "identifier":
+                            return s.text.decode("utf-8", errors="replace") + "="
 
         # Most languages use a 'name' child.
         # field_identifier covers C++ class member function names inside
