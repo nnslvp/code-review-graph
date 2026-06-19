@@ -2743,3 +2743,29 @@ class TestRubySpecDetection:
         parser = CodeParser()
         nodes, _ = parser.parse_file(FIXTURES / "user_test.rb")
         assert any(n.is_test for n in nodes if n.kind in ("Function", "Test"))
+
+
+class TestRailsResolver:
+    def test_cross_file_resolution(self, tmp_path):
+        from code_review_graph.graph import GraphStore
+        from code_review_graph.incremental import full_build
+        from code_review_graph.postprocessing import run_post_processing
+
+        (tmp_path / "app" / "models").mkdir(parents=True)
+        (tmp_path / "lib").mkdir()
+        (tmp_path / "lib" / "user.rb").write_text("class User\nend\n")
+        (tmp_path / "app" / "models" / "user.rb").write_text(
+            "class User < ApplicationRecord\n  has_many :posts\nend\n"
+        )
+        (tmp_path / "app" / "models" / "post.rb").write_text(
+            "class Post < ApplicationRecord\n  belongs_to :user\nend\n"
+        )
+        (tmp_path / "main.rb").write_text("require_relative 'lib/user'\n")
+        store = GraphStore(str(tmp_path / "g.db"))
+        result = full_build(tmp_path, store)
+        run_post_processing(store)
+        assert "ruby_resolution" in result
+        rows = store._conn.execute(
+            "SELECT target_qualified FROM edges WHERE kind='ASSOCIATES'"
+        ).fetchall()
+        assert any("post.rb" in (r[0] or "") for r in rows)

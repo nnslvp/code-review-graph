@@ -93,6 +93,18 @@ def _run_temporal_resolver(store: GraphStore) -> Optional[dict]:
         logger.warning("Temporal resolver failed: %s", exc)
         return None
 
+
+def _run_ruby_resolver(store: GraphStore) -> Optional[dict]:
+    """Run the Ruby cross-module resolver, swallowing any failure so
+    build never fails because of it. Returns stats or None on error.
+    """
+    try:
+        from .ruby_resolver import resolve_ruby_cross_module
+        return resolve_ruby_cross_module(store)
+    except Exception as exc:  # noqa: BLE001 - best-effort post-pass
+        logger.warning("ruby resolver failed: %s", exc)
+        return None
+
 # Default ignore patterns (in addition to .gitignore).
 #
 # `<dir>/**` patterns are matched at any depth by _should_ignore, so
@@ -904,6 +916,7 @@ def full_build(
     rescript_stats = _run_rescript_resolver(store)
     spring_stats = _run_spring_resolver(store)
     temporal_stats = _run_temporal_resolver(store)
+    ruby_stats = _run_ruby_resolver(store)
 
     return {
         "files_parsed": len(files),
@@ -913,6 +926,7 @@ def full_build(
         "rescript_resolution": rescript_stats,
         "spring_resolution": spring_stats,
         "temporal_resolution": temporal_stats,
+        "ruby_resolution": ruby_stats,
     }
 
 
@@ -1043,6 +1057,9 @@ def incremental_update(
     spring_stats = _run_spring_resolver(store) if spring_changed else None
     temporal_stats = _run_temporal_resolver(store) if spring_changed else None
 
+    ruby_changed = any(rp.endswith(".rb") for rp in all_files)
+    ruby_stats = _run_ruby_resolver(store) if ruby_changed else None
+
     return {
         "files_updated": len(all_files),
         "total_nodes": total_nodes,
@@ -1053,6 +1070,7 @@ def incremental_update(
         "rescript_resolution": rescript_stats,
         "spring_resolution": spring_stats,
         "temporal_resolution": temporal_stats,
+        "ruby_resolution": ruby_stats,
     }
 
 
