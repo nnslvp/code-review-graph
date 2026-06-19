@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+- First-class, Rails-aware Ruby support: class inheritance and mixins
+  (`INCLUDES`/`EXTENDS`/`PREPENDS`), `attr_accessor`/`reader`/`writer`, constants,
+  singleton classes/methods, method visibility, `require_relative` resolution,
+  RSpec/minitest detection, ActiveRecord associations (`ASSOCIATES`),
+  validations/scopes/callbacks metadata, `rails_role` tagging, and
+  controllers/jobs/mailers as flow entry points. No breaking changes; no schema migration.
+
 ## [2.3.6] - 2026-06-10
 
 **Community-response release.** Built from a full audit of every open PR,
