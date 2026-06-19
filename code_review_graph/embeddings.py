@@ -847,6 +847,17 @@ def _node_to_text(node: GraphNode) -> str:
     if node.language:
         parts.append(node.language)
 
+    # 9. Ruby/Rails semantic enrichment (folds parse-time metadata into the vector text)
+    nx = node.extra or {}
+    if nx.get("rails_role"):
+        parts.append(f"rails {nx['rails_role']}")
+    for key in ("associations", "mixins", "rails_scopes"):
+        vals = nx.get(key)
+        if vals:
+            parts.extend(str(v) for v in vals)
+    if nx.get("ruby_kind"):
+        parts.append(str(nx["ruby_kind"]))
+
     return " ".join(parts)
 
 

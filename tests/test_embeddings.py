@@ -1060,6 +1060,77 @@ class TestOpenAIEmbeddingProvider:
                 p.embed_query("x")
 
 
+class TestNodeToTextRailsMetadata:
+    def test_node_to_text_includes_rails_metadata(self, tmp_path):
+        from code_review_graph.embeddings import _node_to_text
+        from code_review_graph.graph import GraphStore
+        from code_review_graph.parser import NodeInfo
+
+        store = GraphStore(str(tmp_path / "g.db"))
+        store.upsert_node(NodeInfo(
+            kind="Class", name="User", file_path="app/models/user.rb",
+            line_start=1, line_end=10, language="ruby",
+            extra={"rails_role": "model", "associations": ["has_many Post"],
+                   "mixins": ["Comparable"]},
+        ))
+        store.commit()
+        node = next(n for n in store.get_nodes_by_kind(["Class"]) if n.name == "User")
+        text = _node_to_text(node)
+        assert "model" in text
+        assert "Post" in text
+        assert "Comparable" in text
+        store.close()
+
+    def test_node_to_text_includes_rails_scopes(self, tmp_path):
+        from code_review_graph.embeddings import _node_to_text
+        from code_review_graph.graph import GraphStore
+        from code_review_graph.parser import NodeInfo
+
+        store = GraphStore(str(tmp_path / "g.db"))
+        store.upsert_node(NodeInfo(
+            kind="Class", name="Article", file_path="app/models/article.rb",
+            line_start=1, line_end=20, language="ruby",
+            extra={"rails_role": "model", "rails_scopes": ["published", "recent"]},
+        ))
+        store.commit()
+        node = next(n for n in store.get_nodes_by_kind(["Class"]) if n.name == "Article")
+        text = _node_to_text(node)
+        assert "published" in text
+        assert "recent" in text
+        store.close()
+
+    def test_node_to_text_includes_ruby_kind(self, tmp_path):
+        from code_review_graph.embeddings import _node_to_text
+        from code_review_graph.graph import GraphStore
+        from code_review_graph.parser import NodeInfo
+
+        store = GraphStore(str(tmp_path / "g.db"))
+        store.upsert_node(NodeInfo(
+            kind="Function", name="name", file_path="app/models/user.rb",
+            line_start=5, line_end=7, language="ruby",
+            parent_name="User",
+            extra={"ruby_kind": "attr_accessor"},
+        ))
+        store.commit()
+        node = next(n for n in store.get_nodes_by_kind(["Function"]) if n.name == "name")
+        text = _node_to_text(node)
+        assert "attr_accessor" in text
+        store.close()
+
+    def test_node_to_text_no_extra_unchanged(self):
+        node = GraphNode(
+            id=1, kind="Function", name="my_func",
+            qualified_name="file.py::my_func", file_path="file.py",
+            line_start=1, line_end=10, language="python",
+            parent_name=None, params=None, return_type=None,
+            is_test=False, file_hash=None, extra={},
+        )
+        text = _node_to_text(node)
+        assert "my_func" in text
+        assert "function" in text
+        assert "python" in text
+
+
 class TestGetProviderOpenAI:
     _MIN_ENV = {
         "CRG_OPENAI_API_KEY": "sk-test",

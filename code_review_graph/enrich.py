@@ -168,6 +168,20 @@ def _format_node_context(
     if tests:
         lines.append(f"  Tests: {', '.join(tests)}")
 
+    # Ruby/Rails metadata
+    extra = node.extra or {}
+    if extra.get("rails_role"):
+        lines.append(f"  Rails role: {extra['rails_role']}")
+    if extra.get("mixins"):
+        lines.append(f"  Mixes in: {', '.join(extra['mixins'])}")
+    if extra.get("rails_scopes"):
+        lines.append(f"  Scopes: {', '.join(extra['rails_scopes'])}")
+    assoc_edges = [e for e in store.get_edges_by_source(qn) if e.kind == "ASSOCIATES"]
+    if assoc_edges:
+        lines.append("  Associations: " + ", ".join(
+            f"{e.extra.get('association')} {e.target_qualified}" for e in assoc_edges
+        ))
+
     return lines
 
 

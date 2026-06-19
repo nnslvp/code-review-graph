@@ -211,6 +211,69 @@ class TestEnrichFileRead:
         assert result == ""
 
 
+class TestEnrichRailsMetadata:
+    def test_enrich_surfaces_rails_role(self, tmp_path):
+        from code_review_graph.enrich import _format_node_context
+        from code_review_graph.graph import GraphStore
+        from code_review_graph.parser import NodeInfo
+
+        store = GraphStore(str(tmp_path / "g.db"))
+        store.upsert_node(NodeInfo(
+            kind="Class", name="User", file_path="app/models/user.rb",
+            line_start=1, line_end=10, language="ruby",
+            extra={"rails_role": "model", "rails_scopes": ["active"]},
+        ))
+        store.commit()
+        node = next(n for n in store.get_nodes_by_kind(["Class"]) if n.name == "User")
+        lines = _format_node_context(node, store, store._conn, str(tmp_path))
+        text = "\n".join(lines)
+        assert "model" in text
+        store.close()
+
+    def test_enrich_surfaces_mixins(self, tmp_path):
+        from code_review_graph.enrich import _format_node_context
+        from code_review_graph.graph import GraphStore
+        from code_review_graph.parser import NodeInfo
+
+        store = GraphStore(str(tmp_path / "g.db"))
+        store.upsert_node(NodeInfo(
+            kind="Class", name="Post", file_path="app/models/post.rb",
+            line_start=1, line_end=20, language="ruby",
+            extra={"rails_role": "model", "mixins": ["Comparable", "Serializable"]},
+        ))
+        store.commit()
+        node = next(n for n in store.get_nodes_by_kind(["Class"]) if n.name == "Post")
+        lines = _format_node_context(node, store, store._conn, str(tmp_path))
+        text = "\n".join(lines)
+        assert "Comparable" in text
+        store.close()
+
+    def test_enrich_surfaces_associations_from_edges(self, tmp_path):
+        from code_review_graph.enrich import _format_node_context
+        from code_review_graph.graph import GraphStore
+        from code_review_graph.parser import EdgeInfo, NodeInfo
+
+        store = GraphStore(str(tmp_path / "g.db"))
+        store.upsert_node(NodeInfo(
+            kind="Class", name="Order", file_path="app/models/order.rb",
+            line_start=1, line_end=30, language="ruby",
+            extra={"rails_role": "model"},
+        ))
+        store.upsert_edge(EdgeInfo(
+            kind="ASSOCIATES",
+            source="app/models/order.rb::Order",
+            target="LineItem",
+            file_path="app/models/order.rb", line=5,
+            extra={"association": "has_many"},
+        ))
+        store.commit()
+        node = next(n for n in store.get_nodes_by_kind(["Class"]) if n.name == "Order")
+        lines = _format_node_context(node, store, store._conn, str(tmp_path))
+        text = "\n".join(lines)
+        assert "LineItem" in text
+        store.close()
+
+
 class TestRunHookOutput:
     """Test the JSON output format of run_hook via enrich_search."""
 
