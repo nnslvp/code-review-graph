@@ -452,6 +452,8 @@ _TEST_FILE_PATTERNS = [
     re.compile(r".*\.test\.resi?$"),
     re.compile(r"test/runtests\.jl$"),
     re.compile(r"test/.*\.jl$"),
+    re.compile(r".*_spec\.rb$"),
+    re.compile(r".*_test\.rb$"),
 ]
 
 _TEST_RUNNER_NAMES = frozenset({
@@ -3437,6 +3439,10 @@ class CodeParser:
 
     _RUBY_REQUIRE_NAMES: frozenset[str] = frozenset({"require", "require_relative"})
 
+    _RSPEC_RUNNER_NAMES: frozenset[str] = frozenset(
+        {"describe", "context", "it", "specify", "feature", "scenario", "example"}
+    )
+
     _RUBY_MIXIN_MACROS: dict[str, str] = {
         "include": "INCLUDES",
         "extend": "EXTENDS",
@@ -3631,6 +3637,26 @@ class CodeParser:
         name, args, receiver = self._ruby_call_parts(child)
         if name is None:
             return False
+
+        # RSpec example/group -> Test node
+        block = child.child_by_field_name("block")
+        if (name in self._RSPEC_RUNNER_NAMES or
+                (receiver is not None and receiver.text == b"RSpec")) and block is not None:
+            desc = self._ruby_first_string_arg(args) if args is not None else None
+            label = f"{name} {desc}" if desc else name
+            test_qn_name = label
+            nodes.append(NodeInfo(
+                kind="Test", name=test_qn_name, file_path=file_path,
+                line_start=child.start_point[0] + 1,
+                line_end=child.end_point[0] + 1,
+                language=language, parent_name=enclosing_class, is_test=True,
+                extra={"ruby_kind": "rspec"},
+            ))
+            self._extract_from_tree(
+                block, source, language, file_path, nodes, edges,
+                enclosing_class, test_qn_name, import_map, defined_names, _depth + 1,
+            )
+            return True
 
         # require / require_relative -> IMPORTS_FROM
         if name in self._RUBY_REQUIRE_NAMES and args is not None:

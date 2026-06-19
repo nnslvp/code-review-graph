@@ -2680,3 +2680,23 @@ class TestSQLParsing:
         targets = {e.target for e in imports}
         # active_orders view and archive procedure both reference orders/users
         assert "orders" in targets or "users" in targets
+
+
+class TestRubySpecDetection:
+    def test_spec_file_is_test_file(self):
+        from code_review_graph.parser import _is_test_file
+        assert _is_test_file("spec/user_spec.rb")
+        assert _is_test_file("test/user_test.rb")
+
+    def test_rspec_examples_are_tests(self):
+        parser = CodeParser()
+        nodes, _ = parser.parse_file(FIXTURES / "user_spec.rb")
+        tests = [n for n in nodes if n.kind == "Test" and n.is_test]
+        descs = {n.name for n in tests}
+        assert any("save" in d or "persists" in d or "describe" in d.lower()
+                   or "it" in d.lower() for d in descs) or len(tests) >= 1
+
+    def test_minitest_method_is_test(self):
+        parser = CodeParser()
+        nodes, _ = parser.parse_file(FIXTURES / "user_test.rb")
+        assert any(n.is_test for n in nodes if n.kind in ("Function", "Test"))
