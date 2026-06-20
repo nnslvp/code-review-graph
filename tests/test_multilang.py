@@ -601,6 +601,55 @@ class TestRailsDSL:
         assert "has_many" not in ct and "validates" not in ct
 
 
+class TestRubyAttributeMacro:
+    def setup_method(self):
+        self.parser = CodeParser()
+        self.nodes, self.edges = self.parser.parse_file(FIXTURES / "brom_entity.rb")
+
+    def test_attribute_creates_getter_and_setter(self):
+        fn = {n.name for n in self.nodes if n.kind == "Function"}
+        assert "id" in fn
+        assert "id=" in fn
+        assert "amount_cents" in fn
+        assert "amount_cents=" in fn
+        assert "created_at" in fn
+        assert "created_at=" in fn
+
+    def test_attribute_kind_is_function(self):
+        for name in ("id", "id=", "amount_cents", "amount_cents=", "created_at", "created_at="):
+            node = next((n for n in self.nodes if n.kind == "Function" and n.name == name), None)
+            assert node is not None, f"Expected Function node '{name}'"
+            assert node.kind == "Function"
+
+    def test_attribute_ruby_kind_metadata(self):
+        for name in ("id", "id=", "amount_cents", "amount_cents=", "created_at", "created_at="):
+            node = next((n for n in self.nodes if n.kind == "Function" and n.name == name), None)
+            assert node is not None
+            assert node.extra.get("ruby_kind") == "attribute"
+
+    def test_attribute_type_in_extra(self):
+        amount = next(
+            (n for n in self.nodes if n.kind == "Function" and n.name == "amount_cents"), None
+        )
+        assert amount is not None
+        assert amount.extra.get("attr_type") == "decimal"
+
+        created = next(
+            (n for n in self.nodes if n.kind == "Function" and n.name == "created_at"), None
+        )
+        assert created is not None
+        assert created.extra.get("attr_type") == "datetime"
+
+    def test_type_symbol_not_a_node(self):
+        names = {n.name for n in self.nodes}
+        assert "decimal" not in names
+        assert "datetime" not in names
+
+    def test_no_junk_calls_for_attribute_macro(self):
+        call_targets = {e.target.split("/")[-1] for e in self.edges if e.kind == "CALLS"}
+        assert "attribute" not in call_targets
+
+
 class TestPHPParsing:
     def setup_method(self):
         self.parser = CodeParser()

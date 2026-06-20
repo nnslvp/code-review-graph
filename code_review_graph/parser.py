@@ -3464,6 +3464,8 @@ class CodeParser:
         "attr_writer": (False, True),
     }
 
+    _RUBY_ATTRIBUTE_MACROS: frozenset[str] = frozenset({"attribute"})
+
     _RAILS_ASSOCIATION_MACROS: frozenset[str] = frozenset(
         {"has_many", "belongs_to", "has_one", "has_and_belongs_to_many"}
     )
@@ -3485,6 +3487,7 @@ class CodeParser:
     _ALL_RUBY_CLASS_MACROS: frozenset[str] = (
         frozenset(_RUBY_MIXIN_MACROS)
         | frozenset(_RUBY_ATTR_MACROS)
+        | _RUBY_ATTRIBUTE_MACROS
         | _RAILS_ASSOCIATION_MACROS
         | _RAILS_VALIDATION_MACROS
         | _RAILS_SCOPE_MACROS
@@ -3621,6 +3624,33 @@ class CodeParser:
                             line_start=line, line_end=member.end_point[0] + 1,
                             language="ruby", parent_name=name,
                             extra={"ruby_kind": mname},
+                        ))
+                        edges.append(EdgeInfo(
+                            kind="CONTAINS", source=file_path,
+                            target=self._qualify(accessor, file_path, name),
+                            file_path=file_path, line=line,
+                        ))
+                continue
+            # attribute :field_name, :type, default: val -> getter + setter Function nodes
+            if mname in self._RUBY_ATTRIBUTE_MACROS and args is not None:
+                sym_args = [
+                    self._ruby_symbol_text(a)
+                    for a in args.children
+                    if a.type in ("simple_symbol", "symbol")
+                ]
+                sym_args = [s for s in sym_args if s]
+                if sym_args:
+                    field_name = sym_args[0]
+                    attr_type = sym_args[1] if len(sym_args) > 1 else None
+                    node_extra: dict = {"ruby_kind": "attribute"}
+                    if attr_type is not None:
+                        node_extra["attr_type"] = attr_type
+                    for accessor in (field_name, field_name + "="):
+                        nodes.append(NodeInfo(
+                            kind="Function", name=accessor, file_path=file_path,
+                            line_start=line, line_end=member.end_point[0] + 1,
+                            language="ruby", parent_name=name,
+                            extra=node_extra,
                         ))
                         edges.append(EdgeInfo(
                             kind="CONTAINS", source=file_path,
