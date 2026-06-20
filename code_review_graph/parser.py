@@ -3482,8 +3482,9 @@ class CodeParser:
 
     # All class-body DSL macro names: the ordinary-call arm skips emitting a
     # junk CALLS edge for these (they are handled by _emit_ruby_class_dsl).
-    # Derived from _RUBY_MIXIN_MACROS, _RUBY_ATTR_MACROS, _RAILS_ASSOCIATION_MACROS,
-    # _RAILS_VALIDATION_MACROS, _RAILS_SCOPE_MACROS, and _RAILS_CALLBACK_MACROS.
+    # Derived from _RUBY_MIXIN_MACROS, _RUBY_ATTR_MACROS, _RUBY_ATTRIBUTE_MACROS,
+    # _RAILS_ASSOCIATION_MACROS, _RAILS_VALIDATION_MACROS, _RAILS_SCOPE_MACROS,
+    # and _RAILS_CALLBACK_MACROS.
     _ALL_RUBY_CLASS_MACROS: frozenset[str] = (
         frozenset(_RUBY_MIXIN_MACROS)
         | frozenset(_RUBY_ATTR_MACROS)
@@ -3632,31 +3633,32 @@ class CodeParser:
                         ))
                 continue
             # attribute :field_name, :type, default: val -> getter + setter Function nodes
-            if mname in self._RUBY_ATTRIBUTE_MACROS and args is not None:
-                sym_args = [
-                    self._ruby_symbol_text(a)
-                    for a in args.children
-                    if a.type in ("simple_symbol", "symbol")
-                ]
-                sym_args = [s for s in sym_args if s]
-                if sym_args:
-                    field_name = sym_args[0]
-                    attr_type = sym_args[1] if len(sym_args) > 1 else None
-                    node_extra: dict = {"ruby_kind": "attribute"}
-                    if attr_type is not None:
-                        node_extra["attr_type"] = attr_type
-                    for accessor in (field_name, field_name + "="):
-                        nodes.append(NodeInfo(
-                            kind="Function", name=accessor, file_path=file_path,
-                            line_start=line, line_end=member.end_point[0] + 1,
-                            language="ruby", parent_name=name,
-                            extra=node_extra,
-                        ))
-                        edges.append(EdgeInfo(
-                            kind="CONTAINS", source=file_path,
-                            target=self._qualify(accessor, file_path, name),
-                            file_path=file_path, line=line,
-                        ))
+            if mname in self._RUBY_ATTRIBUTE_MACROS:
+                if args is not None:
+                    sym_args = [
+                        self._ruby_symbol_text(a)
+                        for a in args.children
+                        if a.type in ("simple_symbol", "symbol")
+                    ]
+                    sym_args = [s for s in sym_args if s]
+                    if sym_args:
+                        field_name = sym_args[0]
+                        attr_type = sym_args[1] if len(sym_args) > 1 else None
+                        for accessor in (field_name, field_name + "="):
+                            node_extra: dict = {"ruby_kind": "attribute"}
+                            if attr_type is not None:
+                                node_extra["attr_type"] = attr_type
+                            nodes.append(NodeInfo(
+                                kind="Function", name=accessor, file_path=file_path,
+                                line_start=line, line_end=member.end_point[0] + 1,
+                                language="ruby", parent_name=name,
+                                extra=node_extra,
+                            ))
+                            edges.append(EdgeInfo(
+                                kind="CONTAINS", source=file_path,
+                                target=self._qualify(accessor, file_path, name),
+                                file_path=file_path, line=line,
+                            ))
                 continue
             # associations -> ASSOCIATES edges
             first_sym = next(
