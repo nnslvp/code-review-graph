@@ -315,6 +315,10 @@ class TestQueryGraphMixinsOf:
         assert edge["kind"] == "INCLUDES"
         assert edge["source"] == f"{self.model_file}::User"
         assert edge["target"] == f"{self.mixin_file}::Comparable"
+        # summary count must reflect the resolved mixin (regression: was "Found 0")
+        assert len(result["results"]) == 1
+        assert result["results"][0]["name"] == "Comparable"
+        assert "Found 1 result" in result["summary"]
 
     def test_mixins_of_does_not_return_inverted_edges(self):
         result = query_graph(

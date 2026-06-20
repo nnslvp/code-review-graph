@@ -331,11 +331,23 @@ def query_graph(
         elif pattern == "mixins_of":
             for e in store.get_edges_by_source(qn):
                 if e.kind in ("INCLUDES", "EXTENDS", "PREPENDS"):
+                    mod = store.get_node(e.target_qualified)
+                    results.append(
+                        node_to_dict(mod) if mod
+                        else {"qualified_name": e.target_qualified,
+                              "mixin_kind": e.kind}
+                    )
                     edges_out.append(edge_to_dict(e))
 
         elif pattern == "associations_of":
             for e in store.get_edges_by_source(qn):
                 if e.kind == "ASSOCIATES":
+                    model = store.get_node(e.target_qualified)
+                    results.append(
+                        node_to_dict(model) if model
+                        else {"qualified_name": e.target_qualified,
+                              "association": (e.extra or {}).get("association")}
+                    )
                     edges_out.append(edge_to_dict(e))
 
         elif pattern == "file_summary":
