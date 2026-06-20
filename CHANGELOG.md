@@ -9,6 +9,10 @@
   RSpec/minitest detection, ActiveRecord associations (`ASSOCIATES`),
   validations/scopes/callbacks metadata, `rails_role` tagging, and
   controllers/jobs/mailers as flow entry points. No breaking changes; no schema migration.
+- `attribute` macro support (ActiveModel::Attributes — also the `ActiveModel::Attributes` gem's
+  `Brom::Entity`): `attribute :name[, :type]` declarations become accessor
+  (`name`/`name=`) `Function` nodes with `extra.ruby_kind="attribute"` and the
+  declared `attr_type`, instead of noisy `CALLS → attribute` edges.
 
 ## [2.3.6] - 2026-06-10
 
