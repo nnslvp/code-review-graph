@@ -3809,7 +3809,10 @@ class CodeParser:
             and name in self._ALL_RUBY_CLASS_MACROS
         )
         if not is_class_direct_macro:
-            call_name = self._get_call_name(child, language, source) or name
+            if receiver is not None:
+                call_name = name
+            else:
+                call_name = self._get_call_name(child, language, source) or name
             if call_name:
                 tgt = self._resolve_call_target(
                     call_name, file_path, language,
