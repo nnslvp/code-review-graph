@@ -30,6 +30,7 @@ _QUERY_PATTERNS = {
     "inheritors_of": "Find all classes that inherit from a given class",
     "mixins_of": "modules a class includes/extends/prepends",
     "associations_of": "ActiveRecord associations of a model",
+    "dependencies_of": "DI-injected dependencies of a class (dry-auto_inject)",
     "file_summary": "Get a summary of all nodes in a file",
 }
 
@@ -394,6 +395,30 @@ def query_graph(
                             "association": (e.extra or {}).get("association"),
                             "confidence_tier": e.confidence_tier,
                         }
+                        if "::" not in e.target_qualified:
+                            d["unresolved"] = True
+                        results.append(d)
+                    edges_out.append(edge_to_dict(e))
+
+        elif pattern == "dependencies_of":
+            for e in store.get_edges_by_source(qn):
+                if e.kind == "DEPENDS_ON":
+                    dep = store.get_node(e.target_qualified)
+                    if dep:
+                        d = node_to_dict(dep)
+                        d["confidence_tier"] = e.confidence_tier
+                        extra_e = e.extra or {}
+                        if "di_key" in extra_e:
+                            d["di_key"] = extra_e["di_key"]
+                        results.append(d)
+                    else:
+                        d = {
+                            "qualified_name": e.target_qualified,
+                            "confidence_tier": e.confidence_tier,
+                        }
+                        extra_e = e.extra or {}
+                        if "di_key" in extra_e:
+                            d["di_key"] = extra_e["di_key"]
                         if "::" not in e.target_qualified:
                             d["unresolved"] = True
                         results.append(d)

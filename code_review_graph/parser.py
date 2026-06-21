@@ -3612,6 +3612,28 @@ class CodeParser:
                             extra={"confidence_tier": "EXTRACTED"},
                         ))
                         extra.setdefault("mixins", []).append(mod)
+                    elif arg.type == "element_reference":
+                        # include Ns::Import['key1', 'key2'] — dry-auto_inject DI
+                        # Shape: element_reference -> [scope_resolution(…::Import), '[', strings…]
+                        # Check that the receiver constant name is Import.
+                        ref_receiver = arg.children[0] if arg.children else None
+                        if ref_receiver is None:
+                            continue
+                        recv_text = (
+                            ref_receiver.text.decode("utf-8", errors="replace")
+                            if ref_receiver.text else ""
+                        )
+                        last_seg = recv_text.rsplit("::", 1)[-1]
+                        if last_seg != "Import":
+                            continue
+                        keys: list[str] = []
+                        for ref_child in arg.children[1:]:
+                            if ref_child.type == "string":
+                                for sc in ref_child.children:
+                                    if sc.type == "string_content":
+                                        keys.append(sc.text.decode("utf-8", errors="replace"))
+                        if keys:
+                            extra.setdefault("di_keys", []).extend(keys)
                 continue
             # attr_accessor / attr_reader / attr_writer -> synthesized Function nodes
             if mname in self._RUBY_ATTR_MACROS and args is not None:

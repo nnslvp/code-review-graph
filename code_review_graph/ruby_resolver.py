@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import logging
+import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -58,6 +60,188 @@ def _update_edge_extracted(cur, target_qualified: str, extra: dict, edge_id: int
     )
 
 
+def _extract_block_body_first_node(block_node):
+    """Return the first named child of a block/do_block body, or None."""
+    for btype in ("block_body", "body_statement"):
+        body = None
+        for child in block_node.children:
+            if child.type == btype:
+                body = child
+                break
+        if body is not None:
+            for child in body.children:
+                if child.is_named:
+                    return child
+            break
+    return None
+
+
+def _const_from_block(block_node) -> str | None:
+    """Extract a static constant name from a register() block body.
+
+    Handles:
+      - Bare constant:  { ErrorNotifier }  or  { Logging::Logger }
+      - .new call:      { Logging::Logger.new }  or  { Logging::Logger.new(...) }
+
+    Returns the Ruby constant string (e.g. "Logging::Logger", "ErrorNotifier"),
+    or None when the body is not a static constant expression (e.g. Rails.logger,
+    Karafka.producer, resolve(...), conditionals, factories).
+    """
+    first = _extract_block_body_first_node(block_node)
+    if first is None:
+        return None
+
+    if first.type == "constant":
+        return first.text.decode("utf-8", errors="replace")
+
+    if first.type == "scope_resolution":
+        return first.text.decode("utf-8", errors="replace")
+
+    if first.type == "call":
+        receiver = first.child_by_field_name("receiver")
+        method_node = first.child_by_field_name("method")
+        if method_node is None:
+            return None
+        method = method_node.text.decode("utf-8", errors="replace") if method_node.text else ""
+        if method != "new":
+            return None
+        if receiver is None:
+            return None
+        if receiver.type in ("constant", "scope_resolution"):
+            return receiver.text.decode("utf-8", errors="replace")
+
+    return None
+
+
+def _build_container_key_map(files: list[str]) -> dict[str, str]:
+    """Scan Ruby files that include Dry::Container::Mixin and build key -> constant map.
+
+    Only files whose source contains the literal string 'Dry::Container::Mixin'
+    are parsed. For each ``register('key') { Body }`` or ``register('key') do … end``
+    call, extract the constant from the body. Bodies that are not a static constant
+    expression are omitted (no edge emitted for ambiguous/dynamic registrations).
+
+    Returns a dict mapping DI key strings to Ruby constant names
+    (e.g. {'core.logger': 'Logging::Logger', 'core.notifier': 'ErrorNotifier'}).
+    """
+    try:
+        import tree_sitter_language_pack as tslp
+    except ImportError:
+        logger.warning(
+            "ruby_resolver: tree_sitter_language_pack not available; DI resolution skipped"
+        )
+        return {}
+
+    parser = tslp.get_parser("ruby")
+    key_map: dict[str, str] = {}
+
+    for fp in files:
+        try:
+            source = Path(fp).read_bytes()
+        except OSError:
+            continue
+        if b"Dry::Container::Mixin" not in source:
+            continue
+
+        tree = parser.parse(source)
+
+        def _find_register_calls(node) -> None:  # type: ignore[return]
+            if node.type == "call":
+                method = node.child_by_field_name("method")
+                if method is not None and method.text == b"register":
+                    args = node.child_by_field_name("arguments")
+                    block = None
+                    for child in node.children:
+                        if child.type in ("block", "do_block"):
+                            block = child
+                            break
+                    if args is not None and block is not None:
+                        key_str: str | None = None
+                        for arg in args.children:
+                            if arg.type == "string":
+                                for sc in arg.children:
+                                    if sc.type == "string_content":
+                                        key_str = sc.text.decode("utf-8", errors="replace")
+                                        break
+                                if key_str is not None:
+                                    break
+                        if key_str is not None:
+                            const_name = _const_from_block(block)
+                            if const_name is not None:
+                                key_map[key_str] = const_name
+                    return
+            for child in node.children:
+                _find_register_calls(child)
+
+        _find_register_calls(tree.root_node)
+
+    return key_map
+
+
+def _resolve_di_imports(
+    store: "GraphStore",
+    key_map: dict[str, str],
+    const_to_qn: dict[str, str],
+) -> int:
+    """Emit DEPENDS_ON edges for classes with extra['di_keys'] resolved via key_map.
+
+    For each class node that has di_keys set (populated by the parser when it sees
+    include Ns::Import['k1','k2',...]), look up each key in key_map to get a
+    Ruby constant name, then resolve that constant to a qualified node name via
+    const_to_qn (built from the ruby Class/Type node index). Emit a DEPENDS_ON
+    edge with INFERRED confidence tier. Keys not found in key_map, or constants
+    not found in const_to_qn, are silently omitted (never convention-guessed).
+
+    Returns the number of DEPENDS_ON edges emitted.
+    """
+    if not key_map:
+        return 0
+
+    conn = store._conn
+    cur = conn.cursor()
+    emitted = 0
+
+    for row in conn.execute(
+        "SELECT qualified_name, file_path, extra FROM nodes"
+        " WHERE language='ruby' AND kind IN ('Class', 'Type')"
+    ).fetchall():
+        extra = json.loads(row["extra"] or "{}")
+        di_keys: list[str] = extra.get("di_keys", [])
+        if not di_keys:
+            continue
+        src_qn: str = row["qualified_name"]
+        fp: str = row["file_path"]
+        for key in di_keys:
+            const_name = key_map.get(key)
+            if const_name is None:
+                continue
+            target_qn = const_to_qn.get(const_name)
+            if target_qn is None:
+                last_seg = const_name.rsplit("::", 1)[-1]
+                target_qn = const_to_qn.get(last_seg)
+            if target_qn is None:
+                continue
+            edge_extra = json.dumps({"confidence_tier": "INFERRED", "di_key": key})
+            existing = conn.execute(
+                "SELECT id FROM edges"
+                " WHERE kind='DEPENDS_ON' AND source_qualified=?"
+                "   AND target_qualified=? AND file_path=?",
+                (src_qn, target_qn, fp),
+            ).fetchone()
+            if existing is None:
+                cur.execute(
+                    "INSERT INTO edges"
+                    " (kind, source_qualified, target_qualified, file_path, line,"
+                    "  confidence, confidence_tier, extra, updated_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    ("DEPENDS_ON", src_qn, target_qn, fp, 0, 0.7, "INFERRED",
+                     edge_extra, time.time()),
+                )
+                emitted += 1
+
+    return emitted
+
+
 def resolve_ruby_cross_module(store: "GraphStore") -> dict:
     """Resolve Ruby cross-module targets in the graph store.
 
@@ -76,6 +260,7 @@ def resolve_ruby_cross_module(store: "GraphStore") -> dict:
         "consts_resolved": 0,
         "calls_resolved": 0,
         "calls_unresolved": 0,
+        "di_edges_emitted": 0,
     }
 
     conn = store._conn
@@ -102,6 +287,14 @@ def resolve_ruby_cross_module(store: "GraphStore") -> dict:
         if nm not in rank_map or rank < rank_map[nm]:
             const_to_qn[nm] = qn
             rank_map[nm] = rank
+
+    # DI container key -> constant resolution (dry-auto_inject)
+    try:
+        container_key_map = _build_container_key_map(files)
+        if container_key_map:
+            stats["di_edges_emitted"] = _resolve_di_imports(store, container_key_map, const_to_qn)
+    except Exception:
+        logger.exception("ruby_resolver: DI resolution failed")
 
     cur = conn.cursor()
 

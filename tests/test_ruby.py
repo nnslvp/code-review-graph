@@ -228,6 +228,37 @@ def test_ruby_calls_resolve_tier1_same_file(tmp_path):
     )
 
 
+def test_di_import_resolves_via_container(tmp_path):
+    from code_review_graph.graph import GraphStore
+    from code_review_graph.incremental import full_build
+
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "app").mkdir()
+    (tmp_path / "lib" / "container.rb").write_text(
+        "class Container\n"
+        "  include Dry::Container::Mixin\n"
+        "  register('core.logger') { Logging::Logger.new }\n"
+        "  register('core.notifier') { ErrorNotifier }\n"
+        "end\n"
+    )
+    (tmp_path / "app" / "logger.rb").write_text(
+        "module Logging\n  class Logger; end\nend\n"
+    )
+    (tmp_path / "app" / "svc.rb").write_text(
+        "class Svc\n  include App::Import['core.logger']\nend\n"
+    )
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".code-review-graph").mkdir()
+    s = GraphStore(str(tmp_path / ".code-review-graph" / "graph.db"))
+    full_build(tmp_path, s)
+    rows = s._conn.execute(
+        "SELECT target_qualified FROM edges WHERE kind='DEPENDS_ON'"
+    ).fetchall()
+    assert any(
+        "Logging" in r[0] and "Logger" in r[0] for r in rows
+    ), f"Expected DEPENDS_ON edge to Logging::Logger; got: {[r[0] for r in rows]}"
+
+
 def test_ruby_calls_ambiguous_bare_receiver_not_resolved(tmp_path):
     """Two classes with the same bare name in different namespaces must NOT be
     resolved when the caller uses a bare (unqualified) receiver — the edge must
