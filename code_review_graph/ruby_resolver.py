@@ -301,6 +301,58 @@ def resolve_ruby_cross_module(store: "GraphStore") -> dict:
     except Exception:
         logger.exception("ruby_resolver: CALLS arm failed")
 
+    # 4) Propagate resolved CALLS targets to TESTED_BY edges.
+    #    TESTED_BY edges are generated from CALLS edges (test->prod) with the
+    #    same source/target.  When the CALLS target was bare at parse time, the
+    #    corresponding TESTED_BY edge also has a bare target.  Now that CALLS
+    #    edges have been resolved, build a map from (src, bare_name) ->
+    #    qualified_name using the resolved CALLS edges, then update sibling
+    #    TESTED_BY edges so that graph consumers (tests_for / get_transitive_tests)
+    #    can locate tests by the fully-qualified prod node name.
+    try:
+        # Map (source_qn, bare_method_name) -> resolved_target_qn from CALLS edges.
+        # A CALLS edge source_qn = spec::it adds, target_qn = lib::Calc.add
+        # The bare method name is the last segment after "::" or ".".
+        calls_map: dict[tuple[str, str], str] = {}
+        for row in cur.execute(
+            "SELECT source_qualified, target_qualified FROM edges WHERE kind='CALLS'"
+        ).fetchall():
+            src_qn = row["source_qualified"]
+            tgt_qn = row["target_qualified"]
+            if "::" not in tgt_qn:
+                continue  # still unresolved — skip
+            # Extract the bare method name from the resolved target
+            bare = tgt_qn.rsplit("::", 1)[-1]  # e.g. "Calc.add" or "add"
+            # Also index the last "."-segment for method names under a class
+            method = bare.rsplit(".", 1)[-1]    # e.g. "add"
+            for key_name in {bare, method}:
+                key = (src_qn, key_name)
+                if key not in calls_map:
+                    calls_map[key] = tgt_qn
+
+        # Apply resolutions to TESTED_BY edges with bare targets.
+        tb_updated = 0
+        for row in cur.execute(
+            "SELECT id, source_qualified, target_qualified, extra FROM edges"
+            " WHERE kind='TESTED_BY'"
+        ).fetchall():
+            tgt = row["target_qualified"]
+            if "::" in tgt:
+                continue  # already qualified
+            src = row["source_qualified"]
+            resolved = calls_map.get((src, tgt))
+            if resolved:
+                extra = json.loads(row["extra"] or "{}")
+                extra["ruby_resolved"] = True
+                cur.execute(
+                    "UPDATE edges SET target_qualified=?, extra=? WHERE id=?",
+                    (resolved, json.dumps(extra), row["id"]),
+                )
+                tb_updated += 1
+        stats["tested_by_resolved"] = tb_updated
+    except Exception:
+        logger.exception("ruby_resolver: TESTED_BY propagation failed")
+
     store.commit()
     store._invalidate_cache()
     logger.info("ruby_resolver: %s", stats)

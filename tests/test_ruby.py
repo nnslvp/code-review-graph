@@ -360,3 +360,57 @@ def test_ruby_grammar_node_types_present():
                "do_block", "superclass", "body_statement", "constant"}
     missing = required - seen
     assert not missing, f"tree-sitter-ruby node types changed; missing: {missing}"
+
+
+def test_tested_by_direction_and_tests_for(tmp_path):
+    from code_review_graph.graph import GraphStore
+    from code_review_graph.incremental import full_build
+    from code_review_graph.tools.query import query_graph
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "spec").mkdir()
+    (tmp_path / "lib" / "calc.rb").write_text(
+        "class Calc\n  def add(a,b)\n    a+b\n  end\nend\n"
+    )
+    (tmp_path / "spec" / "calc_spec.rb").write_text(
+        "RSpec.describe Calc do\n  it 'adds' do\n    Calc.new.add(1,2)\n  end\nend\n"
+    )
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".code-review-graph").mkdir()
+    s = GraphStore(str(tmp_path / ".code-review-graph" / "graph.db"))
+    full_build(tmp_path, s)
+    res = query_graph(
+        pattern="tests_for",
+        target=f"{tmp_path}/lib/calc.rb::Calc.add",
+        repo_root=str(tmp_path),
+    )
+    assert len(res["results"]) >= 1, (
+        f"tests_for should find the spec via TESTED_BY (direction must be test->prod); "
+        f"got: {res['results']}"
+    )
+
+
+def test_rspec_test_node_gating_to_spec_files(tmp_path):
+    lib_file = tmp_path / "calc.rb"
+    lib_file.write_text(
+        "describe 'something' do\n  context 'when' do\n    it 'works' do end\n  end\nend\n"
+    )
+    nodes, _ = CodeParser().parse_file(lib_file)
+    test_nodes = [n for n in nodes if n.kind == "Test"]
+    assert len(test_nodes) == 0, (
+        f"Non-spec .rb file should not create Test nodes from describe/context; "
+        f"got: {[n.name for n in test_nodes]}"
+    )
+
+
+def test_rspec_test_nodes_created_in_spec_files(tmp_path):
+    spec_dir = tmp_path / "spec"
+    spec_dir.mkdir()
+    spec_file = spec_dir / "calc_spec.rb"
+    spec_file.write_text(
+        "RSpec.describe Calc do\n  it 'adds' do end\nend\n"
+    )
+    nodes, _ = CodeParser().parse_file(spec_file)
+    test_nodes = [n for n in nodes if n.kind == "Test"]
+    assert len(test_nodes) >= 1, (
+        f"Spec file should create Test nodes; got: {[n.name for n in nodes]}"
+    )

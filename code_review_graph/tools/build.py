@@ -308,8 +308,8 @@ def _compute_summaries(store: Any) -> None:
 
         tested_counts: dict[str, int] = {}
         for row in conn.execute(
-            "SELECT source_qualified, COUNT(*) FROM edges "
-            "WHERE kind = 'TESTED_BY' GROUP BY source_qualified"
+            "SELECT target_qualified, COUNT(*) FROM edges "
+            "WHERE kind = 'TESTED_BY' GROUP BY target_qualified"
         ):
             tested_counts[row[0]] = row[1]
 

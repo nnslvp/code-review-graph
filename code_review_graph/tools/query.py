@@ -309,6 +309,7 @@ def query_graph(
                         results.append(d)
 
         elif pattern == "tests_for":
+            seen_test_qns: set[str] = set()
             for e in store.get_edges_by_target(qn):
                 if e.kind == "TESTED_BY":
                     test = store.get_node(e.source_qualified)
@@ -317,6 +318,19 @@ def query_graph(
                         d["confidence_tier"] = e.confidence_tier
                         results.append(d)
                         edges_out.append(edge_to_dict(e))
+                        seen_test_qns.add(test.qualified_name)
+            # Bare-name fallback: TESTED_BY edges with unresolved bare targets
+            # (e.g. Ruby method calls through non-constant receivers).
+            bare_name = qn.rsplit("::", 1)[-1].rsplit(".", 1)[-1] if "::" in qn else qn
+            for e in store.search_edges_by_target_name(bare_name, kind="TESTED_BY"):
+                if e.source_qualified not in seen_test_qns:
+                    test = store.get_node(e.source_qualified)
+                    if test and test.is_test:
+                        d = node_to_dict(test)
+                        d["confidence_tier"] = "INFERRED"
+                        results.append(d)
+                        edges_out.append(edge_to_dict(e))
+                        seen_test_qns.add(test.qualified_name)
             # Also search by naming convention
             name = node.name if node else target
             test_nodes = store.search_nodes(f"test_{name}", limit=10)

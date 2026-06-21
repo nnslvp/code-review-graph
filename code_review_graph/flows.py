@@ -417,9 +417,14 @@ def compute_criticality(flow: dict, adj: FlowAdjacency) -> float:
     security_score = min(security_hits / max(len(nodes), 1), 1.0)
 
     # --- Test coverage gap (0.0 - 1.0) ---
-    tested_count = sum(1 for n in nodes if n.qualified_name in has_tested_by)
-    coverage = tested_count / max(len(nodes), 1)
-    test_gap = 1.0 - coverage
+    # When no TESTED_BY edges exist in the graph, coverage is unknown — do not
+    # penalize the flow's criticality score with a false gap signal.
+    if not has_tested_by:
+        test_gap = 0.0
+    else:
+        tested_count = sum(1 for n in nodes if n.qualified_name in has_tested_by)
+        coverage = tested_count / max(len(nodes), 1)
+        test_gap = 1.0 - coverage
 
     # --- Depth (0.0 - 1.0) ---
     depth = flow.get("depth", 0)

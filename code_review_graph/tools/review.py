@@ -106,7 +106,7 @@ def get_review_context(
             test_edges = [
                 e for e in impact["edges"] if e.kind == "TESTED_BY"
             ]
-            tested_qualified = {e.source_qualified for e in test_edges}
+            tested_qualified = {e.target_qualified for e in test_edges}
             test_gap_count = sum(
                 1 for f in changed_funcs
                 if f.qualified_name not in tested_qualified
@@ -250,7 +250,7 @@ def _generate_review_guidance(
         n for n in impact["changed_nodes"] if n.kind == "Function"
     ]
     test_edges = [e for e in impact["edges"] if e.kind == "TESTED_BY"]
-    tested_funcs = {e.source_qualified for e in test_edges}
+    tested_funcs = {e.target_qualified for e in test_edges}
 
     untested = [
         f for f in changed_funcs

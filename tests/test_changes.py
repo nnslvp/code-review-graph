@@ -630,3 +630,84 @@ class TestAnalyzeChangesInternalParseRemap:
         # No remapping: keys passed through exactly as the caller gave them.
         assert list(captured["ranges"]) == ["app.py"]
         assert any(f["name"] == "rel_func" for f in result["changed_functions"])
+
+
+class TestCoverageUnknown:
+    """When no TESTED_BY edges exist in the graph, report coverage_unknown
+    instead of flagging every changed function as a test gap."""
+
+    def setup_method(self):
+        self.tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+        self.store = GraphStore(self.tmp.name)
+
+    def teardown_method(self):
+        self.store.close()
+        Path(self.tmp.name).unlink(missing_ok=True)
+
+    def _add_func(self, name: str, path: str = "app.rb", line_start: int = 1,
+                  line_end: int = 10, language: str = "ruby") -> None:
+        self.store.upsert_node(NodeInfo(
+            kind="Function", name=name, file_path=path,
+            line_start=line_start, line_end=line_end, language=language,
+        ), file_hash="abc")
+        self.store.commit()
+
+    def test_no_tested_by_edges_means_coverage_unknown(self):
+        """With zero TESTED_BY edges in the graph, detect_changes must NOT list
+        changed functions as test gaps — it should report coverage_unknown."""
+        self._add_func("my_func", path="app.rb", line_start=1, line_end=10)
+
+        result = analyze_changes(
+            self.store,
+            changed_files=["app.rb"],
+            changed_ranges={"app.rb": [(1, 10)]},
+        )
+        assert result["test_gaps"] == [], (
+            "No TESTED_BY in graph => coverage unknown; test_gaps must be empty "
+            f"(got {result['test_gaps']})"
+        )
+        assert result.get("coverage_unknown") is True, (
+            "coverage_unknown flag must be True when no TESTED_BY edges exist "
+            f"(got coverage_unknown={result.get('coverage_unknown')})"
+        )
+
+    def test_coverage_unknown_no_untested_penalty_in_risk_score(self):
+        """With zero TESTED_BY edges, compute_risk_score must NOT add the +0.30
+        untested penalty."""
+        self._add_func("fn", path="app.rb", line_start=1, line_end=10)
+        node = self.store.get_node("app.rb::fn")
+        assert node is not None
+
+        with_penalty_baseline = 0.30
+        score = compute_risk_score(self.store, node)
+        assert score < with_penalty_baseline, (
+            f"Risk score {score} should be below the 0.30 untested penalty "
+            "baseline when coverage is unknown (no TESTED_BY edges in graph)"
+        )
+
+    def test_tested_by_present_means_gaps_reported_normally(self):
+        """When TESTED_BY edges exist, functions with no coverage are still
+        reported as test gaps (existing behaviour preserved)."""
+        self._add_func("tested_fn", path="app.py", line_start=1, line_end=5,
+                       language="python")
+        self._add_func("untested_fn", path="app.py", line_start=10, line_end=20,
+                       language="python")
+        self.store.upsert_node(NodeInfo(
+            kind="Test", name="test_tested_fn", file_path="test_app.py",
+            line_start=1, line_end=5, language="python", is_test=True,
+        ), file_hash="abc")
+        self.store.upsert_edge(EdgeInfo(
+            kind="TESTED_BY", source="test_app.py::test_tested_fn",
+            target="app.py::tested_fn", file_path="test_app.py", line=1,
+        ))
+        self.store.commit()
+
+        result = analyze_changes(
+            self.store,
+            changed_files=["app.py"],
+            changed_ranges={"app.py": [(1, 20)]},
+        )
+        gap_names = {g["name"] for g in result["test_gaps"]}
+        assert "untested_fn" in gap_names
+        assert "tested_fn" not in gap_names
+        assert result.get("coverage_unknown") is not True

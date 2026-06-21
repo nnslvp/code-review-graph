@@ -252,9 +252,13 @@ def compute_risk_score(store: GraphStore, node: GraphNode) -> float:
     score += min(cross_community * 0.05, 0.15)
 
     # --- Test coverage (direct + transitive) ---
-    transitive_tests = store.get_transitive_tests(node.qualified_name)
-    test_count = len(transitive_tests)
-    score += 0.30 - (min(test_count / 5.0, 1.0) * 0.25)
+    # When no TESTED_BY edges exist anywhere in the graph, coverage is unknown
+    # (static analysis has no signal yet). Skip the penalty in that case to
+    # avoid false risk inflation.
+    if store.has_any_tested_by_edges():
+        transitive_tests = store.get_transitive_tests(node.qualified_name)
+        test_count = len(transitive_tests)
+        score += 0.30 - (min(test_count / 5.0, 1.0) * 0.25)
 
     # --- Security sensitivity ---
     name_lower = node.name.lower()
@@ -348,19 +352,23 @@ def analyze_changes(
     affected = get_affected_flows(store, changed_files)
 
     # Detect test gaps: changed functions without TESTED_BY edges.
+    # When the graph has no TESTED_BY edges at all, coverage is unknown —
+    # do not report every changed function as a gap (no false alarms).
+    coverage_unknown = not store.has_any_tested_by_edges()
     test_gaps: list[dict[str, Any]] = []
-    for node in changed_funcs:
-        if node.is_test:
-            continue
-        tested = store.get_edges_by_target(node.qualified_name)
-        if not any(e.kind == "TESTED_BY" for e in tested):
-            test_gaps.append({
-                "name": _sanitize_name(node.name),
-                "qualified_name": _sanitize_name(node.qualified_name),
-                "file": node.file_path,
-                "line_start": node.line_start,
-                "line_end": node.line_end,
-            })
+    if not coverage_unknown:
+        for node in changed_funcs:
+            if node.is_test:
+                continue
+            tested = store.get_edges_by_target(node.qualified_name)
+            if not any(e.kind == "TESTED_BY" for e in tested):
+                test_gaps.append({
+                    "name": _sanitize_name(node.name),
+                    "qualified_name": _sanitize_name(node.qualified_name),
+                    "file": node.file_path,
+                    "line_start": node.line_start,
+                    "line_end": node.line_end,
+                })
 
     # Review priorities: top 10 by risk score.
     review_priorities = sorted(node_risks, key=lambda x: x["risk_score"], reverse=True)[:10]
@@ -370,7 +378,8 @@ def analyze_changes(
         f"Analyzed {len(changed_files)} changed file(s):",
         f"  - {len(changed_funcs)} changed function(s)/class(es)",
         f"  - {affected['total']} affected flow(s)",
-        f"  - {len(test_gaps)} test gap(s)",
+        f"  - {len(test_gaps)} test gap(s)" if not coverage_unknown
+        else "  - test coverage: unknown (no TESTED_BY edges in graph yet)",
         f"  - Overall risk score: {overall_risk:.2f}",
     ]
     if test_gaps:
@@ -404,6 +413,7 @@ def analyze_changes(
         "changed_functions": node_risks,
         "affected_flows": affected["affected_flows"],
         "test_gaps": test_gaps,
+        "coverage_unknown": coverage_unknown,
         "review_priorities": review_priorities,
         "functions_truncated": funcs_truncated,
     }

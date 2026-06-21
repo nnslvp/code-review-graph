@@ -961,6 +961,13 @@ class GraphStore:
         ).fetchone()
         return row["cnt"] if row else 0
 
+    def has_any_tested_by_edges(self) -> bool:
+        """Return True if the graph contains at least one TESTED_BY edge."""
+        row = self._conn.execute(
+            "SELECT 1 FROM edges WHERE kind = 'TESTED_BY' LIMIT 1"
+        ).fetchone()
+        return row is not None
+
     def get_flow_criticalities_for_node(self, node_id: int) -> list[float]:
         """Return criticality values for all flows a node participates in."""
         rows = self._conn.execute(

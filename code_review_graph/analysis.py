@@ -132,7 +132,7 @@ def find_knowledge_gaps(store: GraphStore) -> dict[str, list[dict]]:
         degree[e.source_qualified] += 1
         degree[e.target_qualified] += 1
         if e.kind == "TESTED_BY":
-            tested_nodes.add(e.source_qualified)
+            tested_nodes.add(e.target_qualified)
 
     # 1. Isolated nodes (degree <= 1, not File)
     isolated = []
@@ -346,7 +346,7 @@ def generate_suggested_questions(
     hubs = find_hub_nodes(store, top_n=3)
     edges = store.get_all_edges()
     tested = {
-        e.source_qualified
+        e.target_qualified
         for e in edges if e.kind == "TESTED_BY"
     }
     for h in hubs:

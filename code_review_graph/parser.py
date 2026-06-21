@@ -1035,8 +1035,10 @@ class CodeParser:
         # Resolve bare call targets to qualified names using same-file definitions
         edges = self._resolve_call_targets(nodes, edges, file_path_str)
 
-        # Generate TESTED_BY edges: when a test function calls a production
-        # function, create an edge from the production function back to the test.
+        # Generate TESTED_BY edges: source=test, target=prod.
+        # When a test function calls a production function, emit an edge
+        # from the test (source) to the production function (target) so that
+        # consumers can find tests via get_edges_by_target(prod).
         if test_file:
             test_qnames = set()
             for n in nodes:
@@ -1047,8 +1049,8 @@ class CodeParser:
                 if edge.kind == "CALLS" and edge.source in test_qnames:
                     edges.append(EdgeInfo(
                         kind="TESTED_BY",
-                        source=edge.target,
-                        target=edge.source,
+                        source=edge.source,
+                        target=edge.target,
                         file_path=edge.file_path,
                         line=edge.line,
                     ))
@@ -1147,7 +1149,7 @@ class CodeParser:
             all_nodes.extend(nodes)
             all_edges.extend(edges)
 
-        # Generate TESTED_BY edges
+        # Generate TESTED_BY edges: source=test, target=prod.
         if test_file:
             test_qnames = set()
             for n in all_nodes:
@@ -1158,8 +1160,8 @@ class CodeParser:
                 if edge.kind == "CALLS" and edge.source in test_qnames:
                     all_edges.append(EdgeInfo(
                         kind="TESTED_BY",
-                        source=edge.target,
-                        target=edge.source,
+                        source=edge.source,
+                        target=edge.target,
                         file_path=edge.file_path,
                         line=edge.line,
                     ))
@@ -1272,7 +1274,7 @@ class CodeParser:
             all_nodes.extend(nodes)
             all_edges.extend(edges)
 
-        # Generate TESTED_BY edges
+        # Generate TESTED_BY edges: source=test, target=prod.
         if test_file:
             test_qnames = set()
             for n in all_nodes:
@@ -1288,8 +1290,8 @@ class CodeParser:
                 ):
                     all_edges.append(EdgeInfo(
                         kind="TESTED_BY",
-                        source=edge.target,
-                        target=edge.source,
+                        source=edge.source,
+                        target=edge.target,
                         file_path=edge.file_path,
                         line=edge.line,
                     ))
@@ -1492,7 +1494,7 @@ class CodeParser:
                     node.extra["cell_index"] = cell_idx
                     break
 
-        # Generate TESTED_BY edges
+        # Generate TESTED_BY edges: source=test, target=prod.
         if test_file:
             test_qnames = set()
             for n in all_nodes:
@@ -1503,8 +1505,8 @@ class CodeParser:
                 if edge.kind == "CALLS" and edge.source in test_qnames:
                     all_edges.append(EdgeInfo(
                         kind="TESTED_BY",
-                        source=edge.target,
-                        target=edge.source,
+                        source=edge.source,
+                        target=edge.target,
                         file_path=edge.file_path,
                         line=edge.line,
                     ))
@@ -1975,6 +1977,7 @@ class CodeParser:
 
         edges = self._resolve_call_targets(nodes, edges, file_path_str)
 
+        # Generate TESTED_BY edges: source=test, target=prod.
         if test_file:
             test_qnames = set()
             for n in nodes:
@@ -1985,8 +1988,8 @@ class CodeParser:
                 if edge.kind == "CALLS" and edge.source in test_qnames:
                     edges.append(EdgeInfo(
                         kind="TESTED_BY",
-                        source=edge.target,
-                        target=edge.source,
+                        source=edge.source,
+                        target=edge.target,
                         file_path=edge.file_path,
                         line=edge.line,
                     ))
@@ -3782,10 +3785,14 @@ class CodeParser:
         if name is None:
             return False
 
-        # RSpec example/group -> Test node
+        # RSpec example/group -> Test node (only in spec/test files)
         block = child.child_by_field_name("block")
-        if (name in self._RSPEC_RUNNER_NAMES or
-                (receiver is not None and receiver.text == b"RSpec")) and block is not None:
+        if (
+            (name in self._RSPEC_RUNNER_NAMES or
+                (receiver is not None and receiver.text == b"RSpec"))
+            and block is not None
+            and _is_test_file(file_path)
+        ):
             desc = self._ruby_first_string_arg(args) if args is not None else None
             label = f"{name} {desc}" if desc else name
             test_qn_name = label

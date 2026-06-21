@@ -1390,15 +1390,15 @@ class TestComputeSummaries:
             target="auth.py::login", file_path="db.py", line=3,
         ))
 
-        # TESTED_BY edges from the Test node back to auth functions.
+        # TESTED_BY edges: source=test, target=prod.
         self.store.upsert_edge(EdgeInfo(
-            kind="TESTED_BY", source="auth.py::login",
-            target="tests/test_auth.py::test_login",
+            kind="TESTED_BY", source="tests/test_auth.py::test_login",
+            target="auth.py::login",
             file_path="tests/test_auth.py", line=1,
         ))
         self.store.upsert_edge(EdgeInfo(
-            kind="TESTED_BY", source="auth.py::logout",
-            target="tests/test_auth.py::test_login",
+            kind="TESTED_BY", source="tests/test_auth.py::test_login",
+            target="auth.py::logout",
             file_path="tests/test_auth.py", line=1,
         ))
 
