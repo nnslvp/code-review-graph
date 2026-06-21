@@ -157,7 +157,8 @@ def query_graph(
     Args:
         pattern: Query pattern. One of: callers_of, callees_of, imports_of,
                  importers_of, children_of, tests_for, inheritors_of,
-                 mixins_of, associations_of, file_summary.
+                 mixins_of, associations_of, delegations_of, dependencies_of,
+                 file_summary.
         target: The node name, qualified name, or file path to query about.
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" (full output) or "minimal" (summary only).

@@ -3640,6 +3640,9 @@ class CodeParser:
                 for arg in args.children:
                     if arg.type in ("constant", "scope_resolution"):
                         mod = arg.text.decode("utf-8", errors="replace")
+                        if "ActiveSupport::Concern" in mod:
+                            extra.setdefault("mixins", []).append(mod)
+                            continue
                         edges.append(EdgeInfo(
                             kind=kind,
                             source=src,

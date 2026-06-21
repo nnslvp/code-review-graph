@@ -2,7 +2,53 @@
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-06-22
+
 ### Added
+- ActiveSupport::Concern `included do` / `class_methods do` block extraction:
+  DSL macros and method defs inside these blocks are attributed to includee
+  classes at resolve time, so associations, validations, and callbacks defined
+  inside a Concern propagate correctly to including classes.
+- dry-auto_inject DI → `DEPENDS_ON` edges: `include Ns::Import['key1', 'key2']`
+  shapes are parsed, keys are matched against a resolved container map, and
+  typed DEPENDS_ON edges are emitted (confidence_tier: INFERRED).
+- Service / consumer / worker flow entry points: classes matching
+  `_RUBY_ROLE_BASE_CLASSES` or known path/name patterns are stamped
+  `ruby_role` and their canonical entry method is registered for flow tracing.
+- CALLS resolution (tier-1 / tier-2 / `.new`, qualified): receiver-qualified
+  calls are resolved against the graph; `.new` calls synthesize INSTANTIATES
+  edges; bare calls are resolved by uniqueness within the file scope.
+- `delegate` / `enum` accuracy: `delegate` emits `DELEGATES` edges and
+  synthesizes forwarder `Function` nodes; `enum` calls are suppressed from
+  CALLS edges to avoid noise.
+- `through:` / `polymorphic:` association accuracy: extra metadata is captured
+  on ASSOCIATES edges; polymorphic targets are marked without emitting a
+  concrete (wrong) target node.
+- SimpleCov line-coverage ingestion: `.simplecov-resultset.json` is parsed
+  at resolve time; per-file coverage is stamped on nodes as `line_coverage`
+  (path-normalized, staleness-guarded to 7 days).
+- Confidence-tier surfacing: EXTRACTED / INFERRED / UNKNOWN tiers propagate
+  through resolution and are included in query output.
+- `children_of` pattern and `ruby_owner_qn` for namespace-correct nested-class
+  lookup in `query_graph`.
+
+### Fixed
+- TESTED_BY direction: edges now correctly point FROM test node TO subject,
+  not the reverse; `tests_for` query returns honest `coverage_unknown` when no
+  test node is found rather than an empty result.
+- `ActiveSupport::Concern` no longer emitted as an `EXTENDS` mixin edge:
+  `extend ActiveSupport::Concern` is a framework marker, not a real mixin;
+  the edge is suppressed while `is_concern` detection still gates
+  `included do` / `class_methods do` processing.
+- `rails_role` / `ruby_role` stamping is now gated on actual AR base-class or
+  path matches; plain nested modules that do not inherit from a recognised
+  base are not stamped.
+- `query_graph` docstring now lists all current patterns including
+  `delegations_of` and `dependencies_of`.
+
+No breaking changes; no schema migration.
+
+### Added (from prior unreleased work)
 - First-class, Rails-aware Ruby support: class inheritance and mixins
   (`INCLUDES`/`EXTENDS`/`PREPENDS`), `attr_accessor`/`reader`/`writer`, constants,
   singleton classes/methods, method visibility, `require_relative` resolution,

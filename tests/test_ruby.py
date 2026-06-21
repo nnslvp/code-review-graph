@@ -814,3 +814,16 @@ def test_concern_includer_inherits_associates(tmp_path):
         f"Expected inherited_via='Trackable', got extra={row_extra}"
     )
     assert row_extra.get("confidence_tier") == "INFERRED"
+
+
+def test_concern_not_emitted_as_extends(tmp_path):
+    f = tmp_path / "c.rb"
+    f.write_text("module M\n  extend ActiveSupport::Concern\nend\n")
+    nodes, edges = CodeParser().parse_file(f)
+    bad = [e for e in edges if e.kind in ("EXTENDS", "INCLUDES") and "ActiveSupport::Concern" in e.target]
+    assert not bad, f"Expected no EXTENDS/INCLUDES edge to ActiveSupport::Concern, got: {bad}"
+    module_node = next((n for n in nodes if n.name == "M"), None)
+    assert module_node is not None
+    assert module_node.extra.get("rails_role") is None, (
+        f"Plain Concern module should not be stamped with rails_role, got: {module_node.extra}"
+    )
