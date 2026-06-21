@@ -324,7 +324,10 @@ def query_graph(
             seen = {r.get("qualified_name") for r in results}
             for t in test_nodes:
                 if t.qualified_name not in seen and t.is_test:
-                    results.append(node_to_dict(t))
+                    d = node_to_dict(t)
+                    d["confidence_tier"] = "AMBIGUOUS"
+                    d["unresolved"] = True
+                    results.append(d)
 
         elif pattern == "inheritors_of":
             for e in store.get_edges_by_target(qn):
@@ -353,12 +356,14 @@ def query_graph(
                         d["confidence_tier"] = e.confidence_tier
                         results.append(d)
                     else:
-                        results.append({
+                        d = {
                             "qualified_name": e.target_qualified,
                             "mixin_kind": e.kind,
                             "confidence_tier": e.confidence_tier,
-                            "unresolved": "::" not in e.target_qualified,
-                        })
+                        }
+                        if "::" not in e.target_qualified:
+                            d["unresolved"] = True
+                        results.append(d)
                     edges_out.append(edge_to_dict(e))
 
         elif pattern == "associations_of":
@@ -370,12 +375,14 @@ def query_graph(
                         d["confidence_tier"] = e.confidence_tier
                         results.append(d)
                     else:
-                        results.append({
+                        d = {
                             "qualified_name": e.target_qualified,
                             "association": (e.extra or {}).get("association"),
                             "confidence_tier": e.confidence_tier,
-                            "unresolved": "::" not in e.target_qualified,
-                        })
+                        }
+                        if "::" not in e.target_qualified:
+                            d["unresolved"] = True
+                        results.append(d)
                     edges_out.append(edge_to_dict(e))
 
         elif pattern == "file_summary":

@@ -331,6 +331,54 @@ class TestQueryGraphMixinsOf:
         assert result["edges"] == []
 
 
+class TestQueryGraphTestsFor:
+    """Regression tests for tests_for naming-convention fallback confidence tier."""
+
+    def setup_method(self):
+        self.tmp_dir = tempfile.mkdtemp()
+        self.root = Path(self.tmp_dir).resolve()
+        (self.root / ".git").mkdir()
+        (self.root / ".code-review-graph").mkdir()
+
+        self.prod_file = str(self.root / "handler.py")
+        self.test_file = str(self.root / "test_handler.py")
+        self.db_path = str(self.root / ".code-review-graph" / "graph.db")
+        self._seed_data()
+
+    def teardown_method(self):
+        import shutil
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _seed_data(self):
+        with GraphStore(self.db_path) as store:
+            # Prod node
+            store.upsert_node(NodeInfo(
+                kind="Function", name="process_data", file_path=self.prod_file,
+                line_start=1, line_end=5, language="python",
+            ))
+            # Test node matching naming convention, but no TESTED_BY edge
+            store.upsert_node(NodeInfo(
+                kind="Test", name="test_process_data", file_path=self.test_file,
+                line_start=10, line_end=15, language="python", is_test=True,
+            ))
+            store.commit()
+
+    def test_tests_for_finds_naming_convention_match_with_ambiguous_tier(self):
+        """Test nodes found by naming convention carry AMBIGUOUS tier and unresolved=True."""
+        result = query_graph(
+            pattern="tests_for",
+            target=f"{self.prod_file}::process_data",
+            repo_root=str(self.root),
+        )
+
+        assert result["status"] == "ok"
+        assert len(result["results"]) == 1
+        test = result["results"][0]
+        assert test["name"] == "test_process_data"
+        assert test["confidence_tier"] == "AMBIGUOUS"
+        assert test["unresolved"] is True
+
+
 def _seed_repo_relative_graph(root: Path) -> None:
     """Seed graph data with cwd-relative paths, as eval repos currently do."""
     graph_dir = root / ".code-review-graph"
