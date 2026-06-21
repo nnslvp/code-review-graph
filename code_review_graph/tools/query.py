@@ -294,6 +294,11 @@ def query_graph(
                     child = store.get_node(e.target_qualified)
                     if child:
                         results.append(node_to_dict(child))
+            for n in store.get_nodes_by_kind(["Function", "Type"]):
+                if (n.extra or {}).get("ruby_owner_qn") == qn:
+                    d = node_to_dict(n)
+                    if d.get("qualified_name") not in {r.get("qualified_name") for r in results}:
+                        results.append(d)
 
         elif pattern == "tests_for":
             for e in store.get_edges_by_target(qn):

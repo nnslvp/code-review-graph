@@ -3624,10 +3624,10 @@ class CodeParser:
                             kind="Function", name=accessor, file_path=file_path,
                             line_start=line, line_end=member.end_point[0] + 1,
                             language="ruby", parent_name=name,
-                            extra={"ruby_kind": mname},
+                            extra={"ruby_kind": mname, "ruby_owner_qn": src},
                         ))
                         edges.append(EdgeInfo(
-                            kind="CONTAINS", source=file_path,
+                            kind="CONTAINS", source=src,
                             target=self._qualify(accessor, file_path, name),
                             file_path=file_path, line=line,
                         ))
@@ -3645,7 +3645,7 @@ class CodeParser:
                         field_name = sym_args[0]
                         attr_type = sym_args[1] if len(sym_args) > 1 else None
                         for accessor in (field_name, field_name + "="):
-                            node_extra: dict = {"ruby_kind": "attribute"}
+                            node_extra: dict = {"ruby_kind": "attribute", "ruby_owner_qn": src}
                             if attr_type is not None:
                                 node_extra["attr_type"] = attr_type
                             nodes.append(NodeInfo(
@@ -3655,7 +3655,7 @@ class CodeParser:
                                 extra=node_extra,
                             ))
                             edges.append(EdgeInfo(
-                                kind="CONTAINS", source=file_path,
+                                kind="CONTAINS", source=src,
                                 target=self._qualify(accessor, file_path, name),
                                 file_path=file_path, line=line,
                             ))
@@ -3716,15 +3716,24 @@ class CodeParser:
             lhs = child.child_by_field_name("left")
             if lhs is not None and lhs.type in ("constant", "scope_resolution"):
                 cname = lhs.text.decode("utf-8", errors="replace")
+                const_owner_qn = (
+                    self._qualify(enclosing_class, file_path, None)
+                    if enclosing_class
+                    else None
+                )
+                const_extra: dict = {"ruby_kind": "constant"}
+                if const_owner_qn is not None:
+                    const_extra["ruby_owner_qn"] = const_owner_qn
                 nodes.append(NodeInfo(
                     kind="Type", name=cname, file_path=file_path,
                     line_start=child.start_point[0] + 1,
                     line_end=child.end_point[0] + 1,
                     language=language, parent_name=enclosing_class,
-                    extra={"ruby_kind": "constant"},
+                    extra=const_extra,
                 ))
                 edges.append(EdgeInfo(
-                    kind="CONTAINS", source=file_path,
+                    kind="CONTAINS",
+                    source=const_owner_qn if const_owner_qn is not None else file_path,
                     target=self._qualify(cname, file_path, enclosing_class),
                     file_path=file_path, line=child.start_point[0] + 1,
                 ))

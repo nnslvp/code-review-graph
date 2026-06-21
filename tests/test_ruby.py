@@ -1,6 +1,28 @@
 from pathlib import Path
+
 import tree_sitter_language_pack as tslp
+
 from code_review_graph.parser import CodeParser
+
+
+def test_children_of_brom_model_returns_attribute_accessors(tmp_path):
+    from code_review_graph.graph import GraphStore
+    from code_review_graph.tools.query import query_graph
+    repo = tmp_path
+    (repo / ".git").mkdir()
+    (repo / ".code-review-graph").mkdir()
+    (repo / "user.rb").write_text(
+        "class User < ApplicationModel\n"
+        "  attribute :id\n"
+        "  attribute :name, :string\n"
+        "end\n"
+    )
+    from code_review_graph.incremental import full_build
+    store = GraphStore(str(repo / ".code-review-graph" / "graph.db"))
+    full_build(repo, store)
+    res = query_graph(pattern="children_of", target=f"{repo}/user.rb::User", repo_root=str(repo))
+    names = {r["name"] for r in res["results"]}
+    assert "id" in names and "name" in names
 
 
 def test_member_call_targets_method_not_receiver(tmp_path):
