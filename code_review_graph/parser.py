@@ -3511,7 +3511,7 @@ class CodeParser:
         | _RAILS_VALIDATION_MACROS
         | _RAILS_SCOPE_MACROS
         | _RAILS_CALLBACK_MACROS
-        | frozenset({"delegate", "enum"})
+        | frozenset({"delegate", "enum", "included", "class_methods"})
     )
 
     def _ruby_call_parts(self, node):
@@ -3585,6 +3585,27 @@ class CodeParser:
         if body is None:
             return
         src = self._qualify(name, file_path, enclosing_class)
+
+        # Pre-scan to detect ActiveSupport::Concern (extend ActiveSupport::Concern).
+        # We check before the main loop so that `included do` / `class_methods do`
+        # arms can gate on is_concern regardless of their position in the body.
+        is_concern = False
+        for _pre in body.children:
+            if _pre.type != "call":
+                continue
+            _m = _pre.child_by_field_name("method")
+            if _m is None or _m.text != b"extend":
+                continue
+            _a = _pre.child_by_field_name("arguments")
+            if _a is None:
+                continue
+            for _arg in _a.children:
+                if _arg.type in ("constant", "scope_resolution"):
+                    if _arg.text and b"Concern" in _arg.text:
+                        is_concern = True
+            if is_concern:
+                break
+
         # Visibility tracking: scan body children in order; a bare identifier
         # whose text is public/private/protected flips the current visibility.
         # Methods appearing after a private/protected marker are collected into
@@ -3650,6 +3671,116 @@ class CodeParser:
                                         keys.append(sc.text.decode("utf-8", errors="replace"))
                         if keys:
                             extra.setdefault("di_keys", []).extend(keys)
+                continue
+            # included do ... end (ActiveSupport::Concern) -> recurse block stmts through DSL switch
+            if mname == "included" and is_concern:
+                block = None
+                for ch in member.children:
+                    if ch.type == "do_block":
+                        block = ch
+                        break
+                if block is not None:
+                    block_body = None
+                    for ch in block.children:
+                        if ch.type in ("body_statement", "block_body"):
+                            block_body = ch
+                            break
+                    if block_body is not None:
+                        for stmt in block_body.children:
+                            if stmt.type != "call":
+                                continue
+                            smname, sargs, _ = self._ruby_call_parts(stmt)
+                            if smname is None:
+                                continue
+                            sline = stmt.start_point[0] + 1
+                            sfirst_sym = next(
+                                (self._ruby_symbol_text(a) for a in sargs.children
+                                 if a.type == "simple_symbol"),
+                                None,
+                            ) if sargs else None
+                            sopts = self._ruby_pair_options(sargs) if sargs else {}
+                            if smname in self._RAILS_ASSOCIATION_MACROS and sfirst_sym:
+                                is_polymorphic = (
+                                    sopts.get("polymorphic", "").lower() in ("true", "1", "yes")
+                                    or sopts.get("as") is not None
+                                )
+                                if "class_name" in sopts:
+                                    starget = sopts["class_name"]
+                                elif is_polymorphic:
+                                    starget = sfirst_sym
+                                elif smname in ("has_many", "has_and_belongs_to_many"):
+                                    starget = self._ruby_camelize(
+                                        self._ruby_singularize(sfirst_sym)
+                                    )
+                                else:
+                                    starget = self._ruby_camelize(sfirst_sym)
+                                assoc_extra_c: dict = {
+                                    "association": smname,
+                                    "name": sfirst_sym,
+                                    "options": sopts,
+                                    "confidence_tier": "INFERRED",
+                                }
+                                if sopts.get("through"):
+                                    assoc_extra_c["through"] = sopts["through"]
+                                if is_polymorphic:
+                                    assoc_extra_c["polymorphic"] = True
+                                edges.append(EdgeInfo(
+                                    kind="ASSOCIATES", source=src, target=starget,
+                                    file_path=file_path, line=sline,
+                                    extra=assoc_extra_c,
+                                ))
+                                extra.setdefault("associations", []).append(
+                                    f"{smname} {starget}"
+                                )
+                            elif smname in self._RAILS_VALIDATION_MACROS:
+                                syms = [self._ruby_symbol_text(a) for a in sargs.children
+                                        if a.type == "simple_symbol"] if sargs else []
+                                extra.setdefault("rails_validations", []).extend(
+                                    s for s in syms if s
+                                )
+                            elif smname in self._RAILS_SCOPE_MACROS and sfirst_sym:
+                                extra.setdefault("rails_scopes", []).append(sfirst_sym)
+                            elif smname in self._RAILS_CALLBACK_MACROS and sfirst_sym:
+                                extra.setdefault("rails_callbacks", []).append(
+                                    f"{smname}:{sfirst_sym}"
+                                )
+                continue
+            # class_methods do ... end (ActiveSupport::Concern) -> extract method defs as singleton
+            if mname == "class_methods" and is_concern:
+                block = None
+                for ch in member.children:
+                    if ch.type == "do_block":
+                        block = ch
+                        break
+                if block is not None:
+                    block_body = None
+                    for ch in block.children:
+                        if ch.type in ("body_statement", "block_body"):
+                            block_body = ch
+                            break
+                    if block_body is not None:
+                        for stmt in block_body.children:
+                            if stmt.type != "method":
+                                continue
+                            mdef_name = self._get_name(stmt, "ruby", "function")
+                            if not mdef_name:
+                                continue
+                            cm_extra: dict = {
+                                "ruby_singleton": True,
+                                "ruby_owner_qn": src,
+                            }
+                            cm_qn = self._qualify(f"self.{mdef_name}", file_path, name)
+                            nodes.append(NodeInfo(
+                                kind="Function", name=mdef_name, file_path=file_path,
+                                line_start=stmt.start_point[0] + 1,
+                                line_end=stmt.end_point[0] + 1,
+                                language="ruby", parent_name=name,
+                                extra=cm_extra,
+                            ))
+                            edges.append(EdgeInfo(
+                                kind="CONTAINS", source=src, target=cm_qn,
+                                file_path=file_path, line=stmt.start_point[0] + 1,
+                            ))
                 continue
             # attr_accessor / attr_reader / attr_writer -> synthesized Function nodes
             if mname in self._RUBY_ATTR_MACROS and args is not None:
@@ -3952,6 +4083,11 @@ class CodeParser:
                     extra={"receiver": receiver.text.decode("utf-8", "replace")}
                     if receiver else {},
                 ))
+
+        # `included do` and `class_methods do` blocks are fully handled by
+        # _emit_ruby_class_dsl; do NOT recurse so we avoid duplicate/junk nodes.
+        if is_class_direct_macro and name in ("included", "class_methods"):
+            return True
 
         # Recurse ONCE into this call's children (args + block) for nested calls.
         # Per C-3: call _extract_from_tree(child, ...) NOT a loop over child.children.

@@ -619,6 +619,95 @@ def resolve_ruby_cross_module(store: "GraphStore") -> dict:
     except Exception:
         logger.exception("ruby_resolver: TESTED_BY propagation failed")
 
+    # 5) Propagate concern ASSOCIATES edges to includers.
+    #    For each class that INCLUDES a concern node, copy the concern's
+    #    ASSOCIATES edges onto the includer with extra["inherited_via"] set
+    #    to the concern name.  Deduped: skip if an identical (kind, source,
+    #    target, file_path) edge already exists.
+    try:
+        concern_assoc_emitted = 0
+
+        # Build set of concern qualified_names (nodes with mixins containing
+        # "ActiveSupport::Concern" or whose name appears as an INCLUDES target
+        # where the concern node is known).
+        concern_qns: set[str] = set()
+        for row in conn.execute(
+            "SELECT qualified_name, extra FROM nodes"
+            " WHERE language='ruby' AND kind IN ('Class', 'Type')"
+        ).fetchall():
+            node_extra = json.loads(row["extra"] or "{}")
+            mixins: list[str] = node_extra.get("mixins", [])
+            if any("Concern" in m for m in mixins):
+                concern_qns.add(row["qualified_name"])
+
+        for concern_qn in concern_qns:
+            concern_bare = concern_qn.split("::")[-1].split(".")[-1]
+
+            # Find all ASSOCIATES edges sourced from this concern.
+            assoc_rows = conn.execute(
+                "SELECT target_qualified, file_path, line, extra FROM edges"
+                " WHERE kind='ASSOCIATES' AND source_qualified=?",
+                (concern_qn,),
+            ).fetchall()
+            if not assoc_rows:
+                continue
+
+            # Find all classes that INCLUDE this concern (by bare name or qn).
+            includer_rows = conn.execute(
+                "SELECT source_qualified FROM edges"
+                " WHERE kind='INCLUDES'"
+                "   AND (target_qualified=? OR target_qualified=?)",
+                (concern_qn, concern_bare),
+            ).fetchall()
+
+            for inc_row in includer_rows:
+                includer_qn: str = inc_row["source_qualified"]
+                includer_fp_row = conn.execute(
+                    "SELECT file_path FROM nodes WHERE qualified_name=?",
+                    (includer_qn,),
+                ).fetchone()
+                includer_fp = includer_fp_row["file_path"] if includer_fp_row else ""
+
+                for a_row in assoc_rows:
+                    concern_tgt: str = a_row["target_qualified"]
+                    a_extra = json.loads(a_row["extra"] or "{}")
+
+                    # Skip if already exists (dedup).
+                    existing = conn.execute(
+                        "SELECT id FROM edges"
+                        " WHERE kind='ASSOCIATES' AND source_qualified=?"
+                        "   AND target_qualified=?",
+                        (includer_qn, concern_tgt),
+                    ).fetchone()
+                    if existing is not None:
+                        continue
+
+                    derived_extra = dict(a_extra)
+                    derived_extra["inherited_via"] = concern_bare
+                    derived_extra["confidence_tier"] = "INFERRED"
+                    cur.execute(
+                        "INSERT INTO edges"
+                        " (kind, source_qualified, target_qualified, file_path, line,"
+                        "  confidence, confidence_tier, extra, updated_at)"
+                        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            "ASSOCIATES",
+                            includer_qn,
+                            concern_tgt,
+                            includer_fp,
+                            a_row["line"],
+                            0.7,
+                            "INFERRED",
+                            json.dumps(derived_extra),
+                            time.time(),
+                        ),
+                    )
+                    concern_assoc_emitted += 1
+
+        stats["concern_assoc_emitted"] = concern_assoc_emitted
+    except Exception:
+        logger.exception("ruby_resolver: concern attribution failed")
+
     store.commit()
     store._invalidate_cache()
     logger.info("ruby_resolver: %s", stats)

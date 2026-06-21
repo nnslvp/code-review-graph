@@ -747,3 +747,70 @@ def test_delegate_and_enum_and_assoc_accuracy(tmp_path):
     assert poly and poly[0].extra.get("polymorphic") is True
     through_edges = [e for e in edges if e.kind == "ASSOCIATES" and e.extra.get("through")]
     assert through_edges and through_edges[0].extra.get("through") == "sessions"
+
+
+def test_concern_included_do_dsl_and_class_methods(tmp_path):
+    from pathlib import Path
+    FIX = Path(__file__).parent / "fixtures" / "concern_with_included.rb"
+    nodes, edges = CodeParser().parse_file(FIX)
+    # has_many/scope/before_save inside included do are captured on the concern
+    assoc = {(e.kind, e.extra.get("association")) for e in edges if e.kind == "ASSOCIATES"}
+    assert ("ASSOCIATES", "has_many") in assoc
+    # class_methods do -> tracked? is a method node
+    fn = {n.name for n in nodes if n.kind == "Function"}
+    assert "tracked?" in fn
+    # included do macros are NOT junk CALLS
+    calls = {e.target.split("::")[-1].split(".")[-1] for e in edges if e.kind == "CALLS"}
+    assert "has_many" not in calls and "included" not in calls
+    # tracked? has ruby_singleton=True
+    tracked_nodes = [n for n in nodes if n.name == "tracked?" and n.kind == "Function"]
+    assert len(tracked_nodes) == 1, f"Expected exactly one tracked? node, got {len(tracked_nodes)}"
+    assert tracked_nodes[0].extra.get("ruby_singleton") is True
+    # scope/callback recorded in class extra
+    concern_node = next(n for n in nodes if n.name == "Trackable")
+    assert "recent" in concern_node.extra.get("rails_scopes", [])
+    assert any("before_save" in cb for cb in concern_node.extra.get("rails_callbacks", []))
+
+
+def test_concern_includer_inherits_associates(tmp_path):
+    import sqlite3
+    from code_review_graph.graph import GraphStore
+    from code_review_graph.incremental import full_build
+    from code_review_graph.ruby_resolver import resolve_ruby_cross_module
+
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".code-review-graph").mkdir()
+
+    (tmp_path / "trackable.rb").write_text(
+        "module Trackable\n"
+        "  extend ActiveSupport::Concern\n"
+        "  included do\n"
+        "    has_many :events\n"
+        "  end\n"
+        "end\n"
+    )
+    (tmp_path / "post.rb").write_text(
+        "class Post < ApplicationRecord\n"
+        "  include Trackable\n"
+        "end\n"
+    )
+
+    store = GraphStore(str(tmp_path / ".code-review-graph" / "graph.db"))
+    full_build(tmp_path, store)
+    resolve_ruby_cross_module(store)
+
+    conn = sqlite3.connect(str(tmp_path / ".code-review-graph" / "graph.db"))
+    conn.row_factory = sqlite3.Row
+
+    post_assoc = conn.execute(
+        "SELECT target_qualified, extra FROM edges"
+        " WHERE kind='ASSOCIATES' AND source_qualified LIKE '%Post'",
+    ).fetchall()
+
+    assert post_assoc, "Post should have inherited ASSOCIATES edges from Trackable"
+    row = post_assoc[0]
+    row_extra = json.loads(row["extra"] or "{}")
+    assert row_extra.get("inherited_via") == "Trackable", (
+        f"Expected inherited_via='Trackable', got extra={row_extra}"
+    )
+    assert row_extra.get("confidence_tier") == "INFERRED"
