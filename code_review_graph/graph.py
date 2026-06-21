@@ -396,9 +396,10 @@ class GraphStore:
         # If the input is a class, expand to its methods first.
         input_qns = [qualified_name]
         row = conn.execute(
-            "SELECT kind FROM nodes WHERE qualified_name = ?",
+            "SELECT kind, language FROM nodes WHERE qualified_name = ?",
             (qualified_name,),
         ).fetchone()
+        node_language = row["language"] if row else ""
         if row and row["kind"] == "Class":
             for mrow in conn.execute(
                 "SELECT target_qualified FROM edges "
@@ -435,19 +436,22 @@ class GraphStore:
                     if d:
                         results.append(d)
 
-        # Bare-name fallback for direct
-        bare = qualified_name.rsplit("::", 1)[-1] if "::" in qualified_name else qualified_name
-        for row in conn.execute(
-            "SELECT source_qualified FROM edges "
-            "WHERE target_qualified = ? AND kind = 'TESTED_BY'",
-            (bare,),
-        ).fetchall():
-            src = row["source_qualified"]
-            if src not in seen:
-                seen.add(src)
-                d = _node_dict(src, indirect=False)
-                if d:
-                    results.append(d)
+        # Bare-name fallback for direct — skip for Ruby nodes because Ruby
+        # CALLS edges are qualified via resolve_ruby_cross_module; a bare-name
+        # match here would produce false-positive test coverage links.
+        if node_language != "ruby":
+            bare = qualified_name.rsplit("::", 1)[-1] if "::" in qualified_name else qualified_name
+            for row in conn.execute(
+                "SELECT source_qualified FROM edges "
+                "WHERE target_qualified = ? AND kind = 'TESTED_BY'",
+                (bare,),
+            ).fetchall():
+                src = row["source_qualified"]
+                if src not in seen:
+                    seen.add(src)
+                    d = _node_dict(src, indirect=False)
+                    if d:
+                        results.append(d)
 
         # Transitive: follow CALLS edges, then collect TESTED_BY on callees
         frontier = set(input_qns)

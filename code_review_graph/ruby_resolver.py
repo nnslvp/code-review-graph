@@ -19,6 +19,11 @@ logger = logging.getLogger(__name__)
 
 _CONST_KINDS = ("INHERITS", "INCLUDES", "EXTENDS", "PREPENDS", "ASSOCIATES")
 
+# Matches a Ruby constant: starts with an uppercase letter, no lowercase-then-uppercase
+# camel case needed — just "starts with upper" is enough for a receiver constant check.
+def _is_constant(name: str) -> bool:
+    return bool(name) and name[0].isupper()
+
 
 def _camel_to_path(const_name: str) -> str:
     parts = const_name.split("::")
@@ -43,6 +48,16 @@ def _update_edge(cur, target_qualified: str, extra: dict, edge_id: int) -> None:
     )
 
 
+def _update_edge_extracted(cur, target_qualified: str, extra: dict, edge_id: int) -> None:
+    """Write a resolved target + EXTRACTED confidence back to an edge row."""
+    extra["ruby_resolved"] = True
+    cur.execute(
+        "UPDATE edges SET target_qualified=?, extra=?,"
+        " confidence=?, confidence_tier=? WHERE id=?",
+        (target_qualified, json.dumps(extra), 1.0, "EXTRACTED", edge_id),
+    )
+
+
 def resolve_ruby_cross_module(store: "GraphStore") -> dict:
     """Resolve Ruby cross-module targets in the graph store.
 
@@ -59,6 +74,8 @@ def resolve_ruby_cross_module(store: "GraphStore") -> dict:
         "files_indexed": len(files),
         "imports_resolved": 0,
         "consts_resolved": 0,
+        "calls_resolved": 0,
+        "calls_unresolved": 0,
     }
 
     conn = store._conn
@@ -141,6 +158,109 @@ def resolve_ruby_cross_module(store: "GraphStore") -> dict:
         if qn is not None and qn != tgt:
             _update_edge(cur, qn, extra, eid)
             stats["consts_resolved"] += 1
+
+    # 3) CALLS edges with bare targets -> qualified member node qualnames
+    try:
+        # Build member index: {class_name -> {"instance": {mname: qn}, "singleton": {mname: qn}}}
+        # Index by bare class name (last segment after ::) for fast lookup.
+        member_index: dict[str, dict[str, dict[str, str]]] = {}
+
+        # Collect class nodes: map bare class name -> class qualified_name
+        # (on collisions, prefer app/lib paths like const_to_qn above)
+        class_name_to_qn: dict[str, str] = {}
+        class_rank_map: dict[str, int] = {}
+        for row in conn.execute(
+            "SELECT qualified_name, name, file_path FROM nodes"
+            " WHERE language='ruby' AND kind IN ('Class', 'Type')"
+        ).fetchall():
+            cqn, cnm, cfp = row["qualified_name"], row["name"], row["file_path"]
+            rank = (
+                0
+                if (
+                    "/app/" in cfp
+                    or cfp.startswith("app/")
+                    or "/lib/" in cfp
+                    or cfp.startswith("lib/")
+                )
+                else 1
+            )
+            if cnm not in class_rank_map or rank < class_rank_map[cnm]:
+                class_name_to_qn[cnm] = cqn
+                class_rank_map[cnm] = rank
+
+        # Collect member Function nodes via CONTAINS edges from Class nodes.
+        # This covers both singleton (ruby_singleton=True) and instance methods,
+        # even those without ruby_owner_qn (e.g. plain instance methods).
+        for class_row in conn.execute(
+            "SELECT qualified_name, name FROM nodes"
+            " WHERE language='ruby' AND kind IN ('Class', 'Type')"
+        ).fetchall():
+            class_qn = class_row["qualified_name"]
+            class_bare = class_row["name"]
+            bucket = member_index.setdefault(class_bare, {"instance": {}, "singleton": {}})
+            for member_row in conn.execute(
+                "SELECT n.qualified_name, n.name, n.extra"
+                " FROM edges e JOIN nodes n ON n.qualified_name = e.target_qualified"
+                " WHERE e.kind='CONTAINS' AND e.source_qualified=?"
+                "   AND n.kind='Function' AND n.language='ruby'",
+                (class_qn,),
+            ).fetchall():
+                extra_m = json.loads(member_row["extra"] or "{}")
+                is_singleton = extra_m.get("ruby_singleton", False)
+                mname = member_row["name"]
+                mqn = member_row["qualified_name"]
+                tier = "singleton" if is_singleton else "instance"
+                if mname not in bucket[tier]:
+                    bucket[tier][mname] = mqn
+
+        # Process bare CALLS edges (no '::' in target_qualified)
+        for row in cur.execute(
+            "SELECT id, source_qualified, target_qualified, extra FROM edges"
+            " WHERE kind='CALLS'"
+        ).fetchall():
+            eid = row["id"]
+            tgt = row["target_qualified"]
+            extra = json.loads(row["extra"] or "{}")
+
+            if extra.get("ruby_resolved"):
+                continue
+
+            # Only process bare targets (no '::' means not yet qualified)
+            if "::" in tgt:
+                continue
+
+            receiver = extra.get("receiver", "")
+
+            # Tier-2: constant receiver (starts with uppercase letter)
+            if receiver and _is_constant(receiver):
+                # receiver may be "Foo" or "Foo::Bar" — use last segment as class name
+                class_bare = receiver.rsplit("::", 1)[-1]
+                members = member_index.get(class_bare)
+
+                if members is not None:
+                    resolved_qn: str | None = None
+                    if tgt == "new":
+                        # Builder.new -> initialize instance method (if it exists)
+                        resolved_qn = members["instance"].get("initialize")
+                    else:
+                        # Builder.foo -> singleton method foo
+                        resolved_qn = members["singleton"].get(tgt)
+
+                    if resolved_qn is not None:
+                        _update_edge(cur, resolved_qn, extra, eid)
+                        stats["calls_resolved"] += 1
+                        continue
+
+            # No resolution possible — mark unresolved
+            extra["unresolved"] = True
+            cur.execute(
+                "UPDATE edges SET extra=? WHERE id=?",
+                (json.dumps(extra), eid),
+            )
+            stats["calls_unresolved"] += 1
+
+    except Exception:
+        logger.exception("ruby_resolver: CALLS arm failed")
 
     store.commit()
     store._invalidate_cache()

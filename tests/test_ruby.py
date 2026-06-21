@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import tree_sitter_language_pack as tslp
@@ -85,6 +86,76 @@ def test_singleton_class_methods_owned_by_class(tmp_path):
     contains_edge = contains_edges[0]
     assert contains_edge.source == helper.extra["ruby_owner_qn"], \
         f"CONTAINS edge should be sourced from class qn, got {contains_edge.source} vs {helper.extra['ruby_owner_qn']}"
+
+
+def test_ruby_calls_resolve_const_receiver_and_new(tmp_path):
+    import sqlite3
+
+    from code_review_graph.graph import GraphStore
+    from code_review_graph.incremental import full_build
+    from code_review_graph.ruby_resolver import resolve_ruby_cross_module
+
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".code-review-graph").mkdir()
+
+    (tmp_path / "builder.rb").write_text(
+        "class Builder\n"
+        "  def self.build; end\n"
+        "  def initialize; end\n"
+        "end\n"
+    )
+    (tmp_path / "runner.rb").write_text(
+        "class Runner\n"
+        "  def run\n"
+        "    Builder.new\n"
+        "    Builder.build\n"
+        "  end\n"
+        "end\n"
+    )
+
+    store = GraphStore(str(tmp_path / ".code-review-graph" / "graph.db"))
+    full_build(tmp_path, store)
+    resolve_ruby_cross_module(store)
+
+    conn = sqlite3.connect(str(tmp_path / ".code-review-graph" / "graph.db"))
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT target_qualified, extra, confidence_tier FROM edges"
+        " WHERE kind='CALLS' AND source_qualified LIKE '%Runner.run'"
+    ).fetchall()
+
+    assert len(rows) == 2, f"Expected 2 CALLS from Runner.run, got {len(rows)}: {[dict(r) for r in rows]}"
+
+    by_method = {}
+    for r in rows:
+        extra = json.loads(r["extra"] or "{}")
+        by_method[extra.get("receiver", "") + "." + r["target_qualified"].rsplit("::", 1)[-1].rsplit(".", 1)[-1]] = r
+
+    builder_build_row = next(
+        (r for r in rows if "self.build" in r["target_qualified"]), None
+    )
+    assert builder_build_row is not None, (
+        f"Builder.build should resolve to singleton qualname containing 'self.build'; "
+        f"got targets: {[r['target_qualified'] for r in rows]}"
+    )
+    build_extra = json.loads(builder_build_row["extra"] or "{}")
+    assert build_extra.get("ruby_resolved") is True, "Builder.build edge must be ruby_resolved"
+    assert builder_build_row["confidence_tier"] == "INFERRED", (
+        f"Builder.build must have confidence_tier=INFERRED, got {builder_build_row['confidence_tier']}"
+    )
+
+    builder_new_row = next(
+        (r for r in rows if "initialize" in r["target_qualified"]), None
+    )
+    assert builder_new_row is not None, (
+        f"Builder.new should resolve to initialize qualname; "
+        f"got targets: {[r['target_qualified'] for r in rows]}"
+    )
+    new_extra = json.loads(builder_new_row["extra"] or "{}")
+    assert new_extra.get("ruby_resolved") is True, "Builder.new edge must be ruby_resolved"
+    assert builder_new_row["confidence_tier"] == "INFERRED", (
+        f"Builder.new must have confidence_tier=INFERRED, got {builder_new_row['confidence_tier']}"
+    )
 
 
 def test_ruby_grammar_node_types_present():
