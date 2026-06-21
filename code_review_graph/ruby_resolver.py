@@ -161,10 +161,14 @@ def resolve_ruby_cross_module(store: "GraphStore") -> dict:
 
     # 3) CALLS edges with bare targets -> qualified member node qualnames
     try:
-        # Build member index: {class_name -> {"instance": {mname: qn}, "singleton": {mname: qn}}}
-        # Index by bare class name (last segment after ::) for fast lookup.
-        # On bare-name collisions (two classes with same name), the first class found wins.
+        # Build member index keyed by QUALIFIED class name to avoid bare-name collisions.
+        # Two classes with the same short name in different namespaces (e.g. A::Builder and
+        # B::Builder) must NOT collide — they get separate entries in this dict.
         member_index: dict[str, dict[str, dict[str, str]]] = {}
+
+        # Secondary index: bare class name -> list of qualified class names.
+        # Used to resolve bare receivers: only resolve when exactly one class_qn matches.
+        bare_to_class_qns: dict[str, list[str]] = {}
 
         # Collect member Function nodes via CONTAINS edges from Class nodes.
         # This covers both singleton (ruby_singleton=True) and instance methods,
@@ -175,7 +179,9 @@ def resolve_ruby_cross_module(store: "GraphStore") -> dict:
         ).fetchall():
             class_qn = class_row["qualified_name"]
             class_bare = class_row["name"]
-            bucket = member_index.setdefault(class_bare, {"instance": {}, "singleton": {}})
+            # Key by qualified name — no collision risk here
+            bucket = member_index.setdefault(class_qn, {"instance": {}, "singleton": {}})
+            bare_to_class_qns.setdefault(class_bare, []).append(class_qn)
             for member_row in conn.execute(
                 "SELECT n.qualified_name, n.name, n.extra"
                 " FROM edges e JOIN nodes n ON n.qualified_name = e.target_qualified"
@@ -235,11 +241,31 @@ def resolve_ruby_cross_module(store: "GraphStore") -> dict:
 
             # Tier-2: constant receiver (starts with uppercase letter)
             if receiver and _is_constant(receiver):
-                # receiver may be "Foo" or "Foo::Bar" — use last segment as class name
-                class_bare = receiver.rsplit("::", 1)[-1]
-                members = member_index.get(class_bare)
+                # Resolve the receiver to a class_qn.
+                # If the receiver is qualified (contains "::"), try to find a class whose
+                # qualified_name ends with the receiver string (suffix match).
+                # If bare (no "::"), look up bare_to_class_qns; resolve ONLY when unique.
+                resolved_class_qn: str | None = None
+                if "::" in receiver:
+                    # Fully-qualified receiver: find a class_qn that ends with the receiver
+                    # or whose bare qualified suffix matches.
+                    for cqn in member_index:
+                        # Match by the file-stripped portion: "path::A::B::ClassName"
+                        # Check if the graph qn's namespace portion ends with the receiver.
+                        # The class qn format is "<file>::<NamespacedClass>"; strip file prefix.
+                        ns_part = cqn.split("::", 1)[-1] if "::" in cqn else cqn
+                        if ns_part == receiver or ns_part.endswith("::" + receiver):
+                            resolved_class_qn = cqn
+                            break
+                else:
+                    # Bare receiver: only resolve if exactly one class has this name
+                    candidates = bare_to_class_qns.get(receiver, [])
+                    if len(candidates) == 1:
+                        resolved_class_qn = candidates[0]
+                    # If 0 or >1 candidates: leave resolved_class_qn as None (ambiguous)
 
-                if members is not None:
+                if resolved_class_qn is not None:
+                    members = member_index[resolved_class_qn]
                     resolved_qn: str | None = None
                     if tgt == "new":
                         # Builder.new -> initialize instance method (if it exists)

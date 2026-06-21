@@ -228,6 +228,124 @@ def test_ruby_calls_resolve_tier1_same_file(tmp_path):
     )
 
 
+def test_ruby_calls_ambiguous_bare_receiver_not_resolved(tmp_path):
+    """Two classes with the same bare name in different namespaces must NOT be
+    resolved when the caller uses a bare (unqualified) receiver — the edge must
+    be left unresolved (extra['unresolved']=True, ruby_resolved not set).
+    """
+    import sqlite3
+
+    from code_review_graph.graph import GraphStore
+    from code_review_graph.incremental import full_build
+    from code_review_graph.ruby_resolver import resolve_ruby_cross_module
+
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".code-review-graph").mkdir()
+
+    (tmp_path / "a.rb").write_text(
+        "module A\n"
+        "  class Builder\n"
+        "    def self.build; end\n"
+        "  end\n"
+        "end\n"
+    )
+    (tmp_path / "b.rb").write_text(
+        "module B\n"
+        "  class Builder\n"
+        "    def self.build; end\n"
+        "  end\n"
+        "end\n"
+    )
+    (tmp_path / "other.rb").write_text(
+        "class Other\n"
+        "  def run\n"
+        "    Builder.build\n"
+        "  end\n"
+        "end\n"
+    )
+
+    store = GraphStore(str(tmp_path / ".code-review-graph" / "graph.db"))
+    full_build(tmp_path, store)
+    resolve_ruby_cross_module(store)
+
+    conn = sqlite3.connect(str(tmp_path / ".code-review-graph" / "graph.db"))
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT target_qualified, extra FROM edges"
+        " WHERE kind='CALLS' AND source_qualified LIKE '%Other.run'"
+    ).fetchall()
+
+    assert len(rows) >= 1, "Expected at least one CALLS edge from Other.run"
+    build_row = next(
+        (r for r in rows if json.loads(r["extra"] or "{}").get("receiver") == "Builder"),
+        None,
+    )
+    assert build_row is not None, (
+        f"Expected a CALLS edge with receiver='Builder'; got: "
+        f"{[dict(r) for r in rows]}"
+    )
+    build_extra = json.loads(build_row["extra"] or "{}")
+    assert build_extra.get("unresolved") is True, (
+        "Ambiguous bare Builder.build must be marked unresolved"
+    )
+    assert not build_extra.get("ruby_resolved"), (
+        "Ambiguous bare Builder.build must NOT be marked ruby_resolved"
+    )
+
+
+def test_ruby_calls_unique_bare_receiver_is_resolved(tmp_path):
+    """When there is exactly one class with a given bare name, a bare receiver
+    call to it must still resolve correctly (regression of the working case).
+    """
+    import sqlite3
+
+    from code_review_graph.graph import GraphStore
+    from code_review_graph.incremental import full_build
+    from code_review_graph.ruby_resolver import resolve_ruby_cross_module
+
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".code-review-graph").mkdir()
+
+    (tmp_path / "widget.rb").write_text(
+        "class Widget\n"
+        "  def self.create; end\n"
+        "end\n"
+    )
+    (tmp_path / "factory.rb").write_text(
+        "class Factory\n"
+        "  def make\n"
+        "    Widget.create\n"
+        "  end\n"
+        "end\n"
+    )
+
+    store = GraphStore(str(tmp_path / ".code-review-graph" / "graph.db"))
+    full_build(tmp_path, store)
+    resolve_ruby_cross_module(store)
+
+    conn = sqlite3.connect(str(tmp_path / ".code-review-graph" / "graph.db"))
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT target_qualified, extra, confidence_tier FROM edges"
+        " WHERE kind='CALLS' AND source_qualified LIKE '%Factory.make'"
+    ).fetchall()
+
+    assert len(rows) >= 1, "Expected at least one CALLS edge from Factory.make"
+    widget_row = next(
+        (r for r in rows if "self.create" in r["target_qualified"]),
+        None,
+    )
+    assert widget_row is not None, (
+        f"Widget.create should resolve to singleton qualname containing 'self.create'; "
+        f"got: {[r['target_qualified'] for r in rows]}"
+    )
+    extra = json.loads(widget_row["extra"] or "{}")
+    assert extra.get("ruby_resolved") is True, "Widget.create edge must be ruby_resolved"
+    assert widget_row["confidence_tier"] == "INFERRED", (
+        f"Widget.create must have confidence_tier=INFERRED, got {widget_row['confidence_tier']}"
+    )
+
+
 def test_ruby_grammar_node_types_present():
     src = (Path(__file__).parent / "fixtures" / "ruby_golden.rb").read_bytes()
     root = tslp.get_parser("ruby").parse(src).root_node
