@@ -682,6 +682,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
     <button class="legend-item legend-edge" data-edge-kind="EXTENDS" aria-pressed="true"><span class="legend-line" style="border-top:2px dashed #3fb950"></span> Extends</button>
     <button class="legend-item legend-edge" data-edge-kind="PREPENDS" aria-pressed="true"><span class="legend-line" style="border-top:2px dotted #2ea043"></span> Prepends</button>
     <button class="legend-item legend-edge" data-edge-kind="ASSOCIATES" aria-pressed="true"><span class="legend-line" style="border-top:2px dashed #a371f7"></span> Associates</button>
+    <button class="legend-item legend-edge" data-edge-kind="DELEGATES" aria-pressed="true"><span class="legend-line" style="border-top:2px dashed #89b4fa"></span> Delegates</button>
   </div>
 </nav>
 <div id="filter-panel">
@@ -750,7 +751,7 @@ var KIND_COLOR  = { File:"#58a6ff", Class:"#f0883e", Function:"#3fb950", Test:"#
 var KIND_RADIUS = { File:18, Class:12, Function:6, Test:6, Type:5 };
 var KIND_AREA   = { File:1018, Class:452, Function:113, Test:113, Type:79 };
 var KIND_SHAPE  = { File:d3.symbolCircle, Class:d3.symbolSquare, Function:d3.symbolTriangle, Test:d3.symbolDiamond, Type:d3.symbolCross };
-var EDGE_COLOR  = { CALLS:"#3fb950", IMPORTS_FROM:"#f0883e", INHERITS:"#d2a8ff", CONTAINS:"rgba(139,148,158,0.15)", IMPLEMENTS:"#f9e2af", TESTED_BY:"#f38ba8", DEPENDS_ON:"#fab387", INCLUDES:"#56d364", EXTENDS:"#3fb950", PREPENDS:"#2ea043", ASSOCIATES:"#a371f7" };
+var EDGE_COLOR  = { CALLS:"#3fb950", IMPORTS_FROM:"#f0883e", INHERITS:"#d2a8ff", CONTAINS:"rgba(139,148,158,0.15)", IMPLEMENTS:"#f9e2af", TESTED_BY:"#f38ba8", DEPENDS_ON:"#fab387", INCLUDES:"#56d364", EXTENDS:"#3fb950", PREPENDS:"#2ea043", ASSOCIATES:"#a371f7", DELEGATES:"#89b4fa" };
 var communityColorScale = d3.scaleOrdinal(d3.schemeTableau10);
 var communityColoringOn = false;
 function escH(s) { return !s ? "" : s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;").replace(/`/g,"&#96;"); }
@@ -902,6 +903,7 @@ var EDGE_CFG = {
   EXTENDS:      { dash:"4,4", width:2, opacity:0.65, marker:"url(#arrow-extends)" },
   PREPENDS:     { dash:"2,4", width:2, opacity:0.65, marker:"url(#arrow-prepends)" },
   ASSOCIATES:   { dash:"6,3", width:1.5, opacity:0.6, marker:"url(#arrow-associates)" },
+  DELEGATES:    { dash:"4,4", width:1, opacity:0.55, marker:"url(#arrow-delegates)" },
 };
 function eStyle(d) { return EDGE_CFG[d.kind] || {dash:null,width:1,opacity:0.3,marker:""}; }
 function eColor(d) { return EDGE_COLOR[d.kind] || "#484f58"; }

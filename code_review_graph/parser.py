@@ -3511,6 +3511,7 @@ class CodeParser:
         | _RAILS_VALIDATION_MACROS
         | _RAILS_SCOPE_MACROS
         | _RAILS_CALLBACK_MACROS
+        | frozenset({"delegate", "enum"})
     )
 
     def _ruby_call_parts(self, node):
@@ -3700,6 +3701,34 @@ class CodeParser:
                                 file_path=file_path, line=line,
                             ))
                 continue
+            # delegate :method, :other, to: :assoc -> synthesized Function nodes + DELEGATES edge
+            if mname == "delegate" and args is not None:
+                opts = self._ruby_pair_options(args)
+                to_target = opts.get("to", "")
+                for arg in args.children:
+                    if arg.type != "simple_symbol":
+                        continue
+                    method_name = arg.text.decode("utf-8", errors="replace").lstrip(":")
+                    nodes.append(NodeInfo(
+                        kind="Function", name=method_name, file_path=file_path,
+                        line_start=line, line_end=member.end_point[0] + 1,
+                        language="ruby", parent_name=name,
+                        extra={"ruby_kind": "delegate", "ruby_owner_qn": src},
+                    ))
+                    edges.append(EdgeInfo(
+                        kind="CONTAINS", source=src,
+                        target=self._qualify(method_name, file_path, name),
+                        file_path=file_path, line=line,
+                    ))
+                edges.append(EdgeInfo(
+                    kind="DELEGATES", source=src, target=to_target,
+                    file_path=file_path, line=line,
+                    extra={"confidence_tier": "EXTRACTED"},
+                ))
+                continue
+            # enum :name, [...] -> suppress only (no node/edge, no junk CALLS)
+            if mname == "enum":
+                continue
             # associations -> ASSOCIATES edges
             first_sym = next(
                 (self._ruby_symbol_text(a) for a in args.children if a.type == "simple_symbol"),
@@ -3707,17 +3736,32 @@ class CodeParser:
             ) if args else None
             opts = self._ruby_pair_options(args) if args else {}
             if mname in self._RAILS_ASSOCIATION_MACROS and first_sym:
+                is_polymorphic = (
+                    opts.get("polymorphic", "").lower() in ("true", "1", "yes")
+                    or opts.get("as") is not None
+                )
                 if "class_name" in opts:
                     target = opts["class_name"]
+                elif is_polymorphic:
+                    target = first_sym
                 elif mname in ("has_many", "has_and_belongs_to_many"):
                     target = self._ruby_camelize(self._ruby_singularize(first_sym))
                 else:
                     target = self._ruby_camelize(first_sym)
+                assoc_extra: dict = {
+                    "association": mname,
+                    "name": first_sym,
+                    "options": opts,
+                    "confidence_tier": "INFERRED",
+                }
+                if opts.get("through"):
+                    assoc_extra["through"] = opts["through"]
+                if is_polymorphic:
+                    assoc_extra["polymorphic"] = True
                 edges.append(EdgeInfo(
                     kind="ASSOCIATES", source=src, target=target,
                     file_path=file_path, line=line,
-                    extra={"association": mname, "name": first_sym,
-                           "options": opts, "confidence_tier": "INFERRED"},
+                    extra=assoc_extra,
                 ))
                 extra.setdefault("associations", []).append(f"{mname} {target}")
             elif mname in self._RAILS_VALIDATION_MACROS:

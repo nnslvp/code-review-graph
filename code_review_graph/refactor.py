@@ -504,7 +504,7 @@ def find_dead_code(
             bare_inh = store.search_edges_by_target_name(node.name, kind="INHERITS")
             incoming = incoming + bare_inh
         # Check mixin kinds -- modules included/extended/prepended or associated are not dead.
-        _mixin_kinds = ("INCLUDES", "EXTENDS", "PREPENDS", "ASSOCIATES")
+        _mixin_kinds = ("INCLUDES", "EXTENDS", "PREPENDS", "ASSOCIATES", "DELEGATES")
         if not any(e.kind in _mixin_kinds for e in incoming):
             for _mk in _mixin_kinds:
                 bare_mx = store.search_edges_by_target_name(node.name, kind=_mk)

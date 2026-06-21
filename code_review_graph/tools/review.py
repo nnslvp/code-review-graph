@@ -274,7 +274,7 @@ def _generate_review_guidance(
     inheritance_edges = [
         e for e in impact["edges"]
         if e.kind in ("INHERITS", "IMPLEMENTS",
-                      "INCLUDES", "EXTENDS", "PREPENDS")
+                      "INCLUDES", "EXTENDS", "PREPENDS", "DELEGATES")
     ]
     if inheritance_edges:
         guidance_parts.append(

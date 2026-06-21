@@ -656,3 +656,94 @@ def test_di_idempotency_no_duplicate_edges(tmp_path):
         f"Expected exactly 1 DEPENDS_ON edge to Logger after two builds; "
         f"got {len(logger_edges)}: {logger_edges}"
     )
+
+
+def test_delegate_synthesizes_function_node_and_delegates_edge(tmp_path):
+    f = tmp_path / "m.rb"
+    f.write_text(
+        "class User < ApplicationRecord\n"
+        "  delegate :currency, to: :account\n"
+        "end\n"
+    )
+    nodes, edges = CodeParser().parse_file(f)
+    fn_names = {n.name for n in nodes if n.kind == "Function"}
+    assert "currency" in fn_names, f"expected 'currency' Function node; got {fn_names}"
+    delegate_fn = next(n for n in nodes if n.kind == "Function" and n.name == "currency")
+    assert delegate_fn.extra.get("ruby_kind") == "delegate"
+    assert any(e.kind == "DELEGATES" for e in edges), "expected a DELEGATES edge"
+    delegates_edge = next(e for e in edges if e.kind == "DELEGATES")
+    assert delegates_edge.target == "account" or "account" in delegates_edge.target
+    calls_targets = {e.target.split("::")[-1].split(".")[-1] for e in edges if e.kind == "CALLS"}
+    assert "delegate" not in calls_targets, "delegate must not emit a junk CALLS edge"
+
+
+def test_enum_suppressed_no_calls_edge(tmp_path):
+    f = tmp_path / "m.rb"
+    f.write_text(
+        "class Order < ApplicationRecord\n"
+        "  enum :status, [:pending, :shipped]\n"
+        "end\n"
+    )
+    nodes, edges = CodeParser().parse_file(f)
+    calls_targets = {e.target.split("::")[-1].split(".")[-1] for e in edges if e.kind == "CALLS"}
+    assert "enum" not in calls_targets, "enum must not emit a junk CALLS edge"
+
+
+def test_has_many_through_sets_extra(tmp_path):
+    f = tmp_path / "m.rb"
+    f.write_text(
+        "class User < ApplicationRecord\n"
+        "  has_many :logs, through: :sessions\n"
+        "end\n"
+    )
+    nodes, edges = CodeParser().parse_file(f)
+    assoc_edges = [e for e in edges if e.kind == "ASSOCIATES"]
+    assert assoc_edges, "expected an ASSOCIATES edge"
+    e = assoc_edges[0]
+    assert e.extra.get("through") == "sessions", (
+        f"expected through=='sessions'; got extra={e.extra}"
+    )
+
+
+def test_belongs_to_polymorphic_marks_edge_no_concrete_target(tmp_path):
+    f = tmp_path / "m.rb"
+    f.write_text(
+        "class Comment < ApplicationRecord\n"
+        "  belongs_to :subject, polymorphic: true\n"
+        "end\n"
+    )
+    nodes, edges = CodeParser().parse_file(f)
+    assoc_edges = [e for e in edges if e.kind == "ASSOCIATES"]
+    assert assoc_edges, "expected an ASSOCIATES edge"
+    e = assoc_edges[0]
+    assert e.extra.get("polymorphic") is True, (
+        f"expected polymorphic==True; got extra={e.extra}"
+    )
+    assert e.target != "Subject", (
+        f"polymorphic belongs_to must not camelize to a concrete target; got target={e.target!r}"
+    )
+
+
+def test_delegate_and_enum_and_assoc_accuracy(tmp_path):
+    f = tmp_path / "m.rb"
+    f.write_text(
+        "class User < ApplicationRecord\n"
+        "  delegate :currency, to: :account\n"
+        "  enum :status, [:active, :blocked]\n"
+        "  belongs_to :owner, class_name: 'Account'\n"
+        "  has_many :logs, through: :sessions\n"
+        "  belongs_to :subject, polymorphic: true\n"
+        "end\n"
+    )
+    nodes, edges = CodeParser().parse_file(f)
+    fn = {n.name for n in nodes if n.kind == "Function"}
+    assert "currency" in fn
+    assert any(e.kind == "DELEGATES" for e in edges)
+    calls = {e.target.split("::")[-1].split(".")[-1] for e in edges if e.kind == "CALLS"}
+    assert "delegate" not in calls and "enum" not in calls
+    assoc_targets = {e.target for e in edges if e.kind == "ASSOCIATES"}
+    assert "Account" in assoc_targets
+    poly = [e for e in edges if e.kind == "ASSOCIATES" and e.extra.get("polymorphic")]
+    assert poly and poly[0].extra.get("polymorphic") is True
+    through_edges = [e for e in edges if e.kind == "ASSOCIATES" and e.extra.get("through")]
+    assert through_edges and through_edges[0].extra.get("through") == "sessions"

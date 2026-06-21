@@ -30,6 +30,7 @@ _QUERY_PATTERNS = {
     "inheritors_of": "Find all classes that inherit from a given class",
     "mixins_of": "modules a class includes/extends/prepends",
     "associations_of": "ActiveRecord associations of a model",
+    "delegations_of": "methods delegated by a class via `delegate`",
     "dependencies_of": "DI-injected dependencies of a class (dry-auto_inject)",
     "file_summary": "Get a summary of all nodes in a file",
 }
@@ -398,6 +399,17 @@ def query_graph(
                         if "::" not in e.target_qualified:
                             d["unresolved"] = True
                         results.append(d)
+                    edges_out.append(edge_to_dict(e))
+
+        elif pattern == "delegations_of":
+            for e in store.get_edges_by_source(qn):
+                if e.kind == "DELEGATES":
+                    d = {
+                        "qualified_name": e.target_qualified,
+                        "delegate_to": e.target_qualified,
+                        "confidence_tier": e.confidence_tier,
+                    }
+                    results.append(d)
                     edges_out.append(edge_to_dict(e))
 
         elif pattern == "dependencies_of":
