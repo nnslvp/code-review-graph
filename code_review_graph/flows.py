@@ -476,9 +476,24 @@ def compute_criticality(flow: dict, adj: FlowAdjacency) -> float:
     security_score = min(security_hits / max(len(nodes), 1), 1.0)
 
     # --- Test coverage gap (0.0 - 1.0) ---
-    # When no TESTED_BY edges exist in the graph, coverage is unknown — do not
-    # penalize the flow's criticality score with a false gap signal.
-    if not has_tested_by:
+    # Prefer real SimpleCov line_coverage (when fresh) over static TESTED_BY.
+    # When no TESTED_BY edges exist and no fresh coverage is available,
+    # coverage is unknown — do not penalize with a false gap signal.
+    fresh_coverages: list[float] = []
+    for n in nodes:
+        extra = n.extra or {}
+        if extra.get("coverage_freshness") == "fresh":
+            val = extra.get("line_coverage")
+            if val is not None:
+                try:
+                    fresh_coverages.append(float(val))
+                except (TypeError, ValueError):
+                    pass
+
+    if fresh_coverages:
+        avg_coverage = sum(fresh_coverages) / len(fresh_coverages)
+        test_gap = 1.0 - avg_coverage
+    elif not has_tested_by:
         test_gap = 0.0
     else:
         tested_count = sum(1 for n in nodes if n.qualified_name in has_tested_by)

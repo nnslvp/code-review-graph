@@ -105,6 +105,22 @@ def _run_ruby_resolver(store: GraphStore) -> Optional[dict]:
         logger.warning("ruby resolver failed: %s", exc)
         return None
 
+
+def _run_coverage_ingest(store: GraphStore, repo_root: Path) -> Optional[dict]:
+    """Run SimpleCov coverage ingestion, swallowing any failure so
+    build never fails because of it. Returns stats or None on error.
+    Only runs when coverage/.resultset.json exists (gated, idempotent).
+    """
+    resultset = repo_root / "coverage" / ".resultset.json"
+    if not resultset.exists():
+        return None
+    try:
+        from .coverage_ingest import ingest_coverage
+        return ingest_coverage(store, str(repo_root))
+    except Exception as exc:  # noqa: BLE001 - best-effort post-pass
+        logger.warning("coverage_ingest failed: %s", exc)
+        return None
+
 # Default ignore patterns (in addition to .gitignore).
 #
 # `<dir>/**` patterns are matched at any depth by _should_ignore, so
@@ -919,6 +935,7 @@ def full_build(
     spring_stats = _run_spring_resolver(store)
     temporal_stats = _run_temporal_resolver(store)
     ruby_stats = _run_ruby_resolver(store)
+    coverage_stats = _run_coverage_ingest(store, repo_root)
 
     return {
         "files_parsed": len(files),
@@ -929,6 +946,7 @@ def full_build(
         "spring_resolution": spring_stats,
         "temporal_resolution": temporal_stats,
         "ruby_resolution": ruby_stats,
+        "coverage_ingest": coverage_stats,
     }
 
 
@@ -1061,6 +1079,7 @@ def incremental_update(
 
     ruby_changed = any(rp.endswith(".rb") for rp in all_files)
     ruby_stats = _run_ruby_resolver(store) if ruby_changed else None
+    coverage_stats = _run_coverage_ingest(store, repo_root) if ruby_changed else None
 
     return {
         "files_updated": len(all_files),
@@ -1073,6 +1092,7 @@ def incremental_update(
         "spring_resolution": spring_stats,
         "temporal_resolution": temporal_stats,
         "ruby_resolution": ruby_stats,
+        "coverage_ingest": coverage_stats,
     }
 
 

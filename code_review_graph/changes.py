@@ -17,6 +17,26 @@ from .constants import SECURITY_KEYWORDS as _SECURITY_KEYWORDS
 from .flows import get_affected_flows
 from .graph import GraphNode, GraphStore, _sanitize_name, node_to_dict
 
+
+def _get_fresh_line_coverage(node: GraphNode) -> float | None:
+    """Return the node's measured line_coverage if fresh, else None.
+
+    Returns None when no coverage data exists, when it is stale, or when
+    the value cannot be parsed — callers should fall back to TESTED_BY.
+    Never lets stale coverage suppress a test gap.
+    """
+    extra = node.extra or {}
+    freshness = extra.get("coverage_freshness")
+    if freshness != "fresh":
+        return None
+    val = extra.get("line_coverage")
+    if val is None:
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
 logger = logging.getLogger(__name__)
 
 _GIT_TIMEOUT = int(os.environ.get("CRG_GIT_TIMEOUT", "30"))  # seconds, configurable
@@ -252,10 +272,14 @@ def compute_risk_score(store: GraphStore, node: GraphNode) -> float:
     score += min(cross_community * 0.05, 0.15)
 
     # --- Test coverage (direct + transitive) ---
-    # When no TESTED_BY edges exist anywhere in the graph, coverage is unknown
-    # (static analysis has no signal yet). Skip the penalty in that case to
-    # avoid false risk inflation.
-    if store.has_any_tested_by_edges():
+    # Prefer real SimpleCov line_coverage (when fresh) over static TESTED_BY.
+    # When no TESTED_BY edges exist and no fresh line_coverage is available,
+    # coverage is unknown — skip the penalty to avoid false risk inflation.
+    fresh_coverage = _get_fresh_line_coverage(node)
+    if fresh_coverage is not None:
+        # Real measured coverage: 0 → full penalty (0.30), 1 → no penalty.
+        score += 0.30 * (1.0 - fresh_coverage)
+    elif store.has_any_tested_by_edges():
         transitive_tests = store.get_transitive_tests(node.qualified_name)
         test_count = len(transitive_tests)
         score += 0.30 - (min(test_count / 5.0, 1.0) * 0.25)
@@ -354,12 +378,27 @@ def analyze_changes(
     # Detect test gaps: changed functions without TESTED_BY edges.
     # When the graph has no TESTED_BY edges at all, coverage is unknown —
     # do not report every changed function as a gap (no false alarms).
-    coverage_unknown = not store.has_any_tested_by_edges()
+    # Exception: when fresh SimpleCov line_coverage is available for a node,
+    # treat 0% coverage as a gap regardless of TESTED_BY edges.
+    has_tested_by = store.has_any_tested_by_edges()
+    coverage_unknown = not has_tested_by
     test_gaps: list[dict[str, Any]] = []
-    if not coverage_unknown:
-        for node in changed_funcs:
-            if node.is_test:
-                continue
+    for node in changed_funcs:
+        if node.is_test:
+            continue
+        fresh_cov = _get_fresh_line_coverage(node)
+        if fresh_cov is not None:
+            # Real measured coverage: only flag as a gap if completely uncovered.
+            # Stale coverage never reaches here (returns None).
+            if fresh_cov < 1.0:
+                test_gaps.append({
+                    "name": _sanitize_name(node.name),
+                    "qualified_name": _sanitize_name(node.qualified_name),
+                    "file": node.file_path,
+                    "line_start": node.line_start,
+                    "line_end": node.line_end,
+                })
+        elif not coverage_unknown:
             tested = store.get_edges_by_target(node.qualified_name)
             if not any(e.kind == "TESTED_BY" for e in tested):
                 test_gaps.append({
