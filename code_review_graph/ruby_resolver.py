@@ -163,30 +163,8 @@ def resolve_ruby_cross_module(store: "GraphStore") -> dict:
     try:
         # Build member index: {class_name -> {"instance": {mname: qn}, "singleton": {mname: qn}}}
         # Index by bare class name (last segment after ::) for fast lookup.
+        # On bare-name collisions (two classes with same name), the first class found wins.
         member_index: dict[str, dict[str, dict[str, str]]] = {}
-
-        # Collect class nodes: map bare class name -> class qualified_name
-        # (on collisions, prefer app/lib paths like const_to_qn above)
-        class_name_to_qn: dict[str, str] = {}
-        class_rank_map: dict[str, int] = {}
-        for row in conn.execute(
-            "SELECT qualified_name, name, file_path FROM nodes"
-            " WHERE language='ruby' AND kind IN ('Class', 'Type')"
-        ).fetchall():
-            cqn, cnm, cfp = row["qualified_name"], row["name"], row["file_path"]
-            rank = (
-                0
-                if (
-                    "/app/" in cfp
-                    or cfp.startswith("app/")
-                    or "/lib/" in cfp
-                    or cfp.startswith("lib/")
-                )
-                else 1
-            )
-            if cnm not in class_rank_map or rank < class_rank_map[cnm]:
-                class_name_to_qn[cnm] = cqn
-                class_rank_map[cnm] = rank
 
         # Collect member Function nodes via CONTAINS edges from Class nodes.
         # This covers both singleton (ruby_singleton=True) and instance methods,
@@ -213,12 +191,17 @@ def resolve_ruby_cross_module(store: "GraphStore") -> dict:
                 if mname not in bucket[tier]:
                     bucket[tier][mname] = mqn
 
-        # Process bare CALLS edges (no '::' in target_qualified)
+        # Process bare CALLS edges (no '::' in target_qualified).
+        # Join through nodes to restrict to ruby-language callers only, so we
+        # don't accidentally stamp extra["unresolved"]=True on non-Ruby edges.
         for row in cur.execute(
-            "SELECT id, source_qualified, target_qualified, extra FROM edges"
-            " WHERE kind='CALLS'"
+            "SELECT e.id, e.source_qualified, e.target_qualified, e.extra"
+            " FROM edges e"
+            " JOIN nodes n ON n.qualified_name = e.source_qualified"
+            " WHERE e.kind='CALLS' AND n.language='ruby'"
         ).fetchall():
             eid = row["id"]
+            src = row["source_qualified"]
             tgt = row["target_qualified"]
             extra = json.loads(row["extra"] or "{}")
 
@@ -230,6 +213,25 @@ def resolve_ruby_cross_module(store: "GraphStore") -> dict:
                 continue
 
             receiver = extra.get("receiver", "")
+
+            # Tier-1: no receiver — look for a same-file def with matching name
+            if not receiver:
+                src_file_row = conn.execute(
+                    "SELECT file_path FROM nodes WHERE qualified_name=?", (src,)
+                ).fetchone()
+                if src_file_row is not None:
+                    src_file = src_file_row["file_path"]
+                    same_file_matches = conn.execute(
+                        "SELECT qualified_name FROM nodes"
+                        " WHERE file_path=? AND name=? AND kind='Function' AND language='ruby'",
+                        (src_file, tgt),
+                    ).fetchall()
+                    if len(same_file_matches) == 1:
+                        matched_qn = same_file_matches[0]["qualified_name"]
+                        _update_edge_extracted(cur, matched_qn, extra, eid)
+                        stats["calls_resolved"] += 1
+                        continue
+                    # Multiple matches: ambiguous — fall through to unresolved
 
             # Tier-2: constant receiver (starts with uppercase letter)
             if receiver and _is_constant(receiver):

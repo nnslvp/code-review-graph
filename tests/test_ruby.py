@@ -126,11 +126,6 @@ def test_ruby_calls_resolve_const_receiver_and_new(tmp_path):
 
     assert len(rows) == 2, f"Expected 2 CALLS from Runner.run, got {len(rows)}: {[dict(r) for r in rows]}"
 
-    by_method = {}
-    for r in rows:
-        extra = json.loads(r["extra"] or "{}")
-        by_method[extra.get("receiver", "") + "." + r["target_qualified"].rsplit("::", 1)[-1].rsplit(".", 1)[-1]] = r
-
     builder_build_row = next(
         (r for r in rows if "self.build" in r["target_qualified"]), None
     )
@@ -155,6 +150,81 @@ def test_ruby_calls_resolve_const_receiver_and_new(tmp_path):
     assert new_extra.get("ruby_resolved") is True, "Builder.new edge must be ruby_resolved"
     assert builder_new_row["confidence_tier"] == "INFERRED", (
         f"Builder.new must have confidence_tier=INFERRED, got {builder_new_row['confidence_tier']}"
+    )
+
+
+def test_ruby_calls_resolve_tier1_same_file(tmp_path):
+    """Tier-1: a bare CALLS edge (no receiver) whose target name matches a Function
+    in the same file as the caller is resolved to its qualified name with EXTRACTED
+    confidence by the ruby resolver.
+
+    We insert the nodes and the unresolved CALLS edge manually to simulate a scenario
+    where the parser emitted a bare call target (e.g. a cross-class call to a method
+    not in the caller file's parse-time symbol table) and the same method happens to
+    exist in the same file.
+    """
+    from code_review_graph.graph import GraphStore
+    from code_review_graph.ruby_resolver import resolve_ruby_cross_module
+    from code_review_graph.parser import NodeInfo, EdgeInfo
+
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".code-review-graph").mkdir()
+    rb_file = str(tmp_path / "a.rb")
+    # File must exist on disk so get_all_files() picks it up
+    (tmp_path / "a.rb").write_text("# placeholder\n")
+
+    s = GraphStore(str(tmp_path / ".code-review-graph" / "graph.db"))
+
+    # File node (required so get_all_files() returns the .rb path)
+    s.upsert_node(NodeInfo(
+        kind="File", name=rb_file, file_path=rb_file,
+        line_start=1, line_end=1, language="ruby",
+        parent_name=None, extra={},
+    ))
+    # Class node
+    s.upsert_node(NodeInfo(
+        kind="Class", name="Greeter", file_path=rb_file,
+        line_start=1, line_end=6, language="ruby",
+        parent_name=None, extra={},
+    ))
+    # Instance method 'greet' (callee)
+    s.upsert_node(NodeInfo(
+        kind="Function", name="greet", file_path=rb_file,
+        line_start=2, line_end=2, language="ruby",
+        parent_name="Greeter", extra={},
+    ))
+    # Instance method 'run' (caller)
+    run_qn = f"{rb_file}::Greeter.run"
+    s.upsert_node(NodeInfo(
+        kind="Function", name="run", file_path=rb_file,
+        line_start=3, line_end=5, language="ruby",
+        parent_name="Greeter", extra={},
+    ))
+    # Bare CALLS edge: run -> 'greet' (bare, no receiver) — not yet resolved.
+    # This simulates a call to a method that was not in the caller file's
+    # parse-time symbol table (e.g. injected via include from another file).
+    s.upsert_edge(EdgeInfo(
+        kind="CALLS",
+        source=run_qn,
+        target="greet",
+        file_path=rb_file,
+        line=4,
+        extra={},
+    ))
+    s.commit()
+
+    resolve_ruby_cross_module(s)
+
+    rows = s._conn.execute(
+        "SELECT target_qualified, confidence_tier FROM edges WHERE kind='CALLS'"
+    ).fetchall()
+    by_tgt = {r[0]: r[1] for r in rows}
+    assert any("greet" in tgt and "::" in tgt for tgt in by_tgt), (
+        f"greet not resolved to qualified name: {by_tgt}"
+    )
+    resolved_tgt = next(t for t in by_tgt if "greet" in t and "::" in t)
+    assert by_tgt[resolved_tgt] == "EXTRACTED", (
+        f"Expected EXTRACTED confidence tier, got {by_tgt[resolved_tgt]}"
     )
 
 
