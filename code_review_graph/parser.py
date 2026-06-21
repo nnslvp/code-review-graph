@@ -842,6 +842,7 @@ class CodeParser:
         self._function_types: dict[str, list[str]] = _FUNCTION_TYPES
         self._import_types: dict[str, list[str]] = _IMPORT_TYPES
         self._call_types: dict[str, list[str]] = _CALL_TYPES
+        self._ruby_owner_qn_stack: list[str] = []
         self._custom_languages: dict[str, CustomLanguage] = {}
         if repo_root is not None:
             self._custom_languages = load_custom_languages(
@@ -3767,9 +3768,13 @@ class CodeParser:
             if lhs is not None and lhs.type in ("constant", "scope_resolution"):
                 cname = lhs.text.decode("utf-8", errors="replace")
                 const_owner_qn = (
-                    self._qualify(enclosing_class, file_path, None)
-                    if enclosing_class
-                    else None
+                    self._ruby_owner_qn_stack[-1]
+                    if enclosing_class and self._ruby_owner_qn_stack
+                    else (
+                        self._qualify(enclosing_class, file_path, None)
+                        if enclosing_class
+                        else None
+                    )
                 )
                 const_extra: dict = {"ruby_kind": "constant"}
                 if const_owner_qn is not None:
@@ -3803,8 +3808,10 @@ class CodeParser:
                             sc_extra: dict = {"ruby_singleton": True}
                             class_qn = None
                             if enclosing_class:
-                                class_qn = self._qualify(
-                                    enclosing_class, file_path, None
+                                class_qn = (
+                                    self._ruby_owner_qn_stack[-1]
+                                    if self._ruby_owner_qn_stack
+                                    else self._qualify(enclosing_class, file_path, None)
                                 )
                                 sc_extra["ruby_owner_qn"] = class_qn
                             sc_qn = self._qualify(
@@ -4888,13 +4895,32 @@ class CodeParser:
             self._emit_ruby_class_dsl(child, name, file_path, enclosing_class,
                                       nodes, edges, extra)
 
-        # Recurse into class body
-        self._extract_from_tree(
-            child, source, language, file_path, nodes, edges,
-            enclosing_class=name, enclosing_func=None,
-            import_map=import_map, defined_names=defined_names,
-            _depth=_depth + 1,
-        )
+        # Recurse into class body.
+        # For Ruby, push the class's fully-qualified name onto the stack so that
+        # nested members can retrieve the exact qn that matches the class NODE's
+        # qualified_name (which includes the outer module prefix). Without this,
+        # _extract_functions would compute ruby_owner_qn as "<file>::UpdateSettings"
+        # while the class node is "<file>::Casinos.UpdateSettings", breaking the
+        # flows bridge lookup.
+        if language == "ruby":
+            _ruby_class_qn = self._qualify(name, file_path, enclosing_class)
+            self._ruby_owner_qn_stack.append(_ruby_class_qn)
+            try:
+                self._extract_from_tree(
+                    child, source, language, file_path, nodes, edges,
+                    enclosing_class=name, enclosing_func=None,
+                    import_map=import_map, defined_names=defined_names,
+                    _depth=_depth + 1,
+                )
+            finally:
+                self._ruby_owner_qn_stack.pop()
+        else:
+            self._extract_from_tree(
+                child, source, language, file_path, nodes, edges,
+                enclosing_class=name, enclosing_func=None,
+                import_map=import_map, defined_names=defined_names,
+                _depth=_depth + 1,
+            )
         return True
 
     def _extract_functions(
@@ -4985,14 +5011,22 @@ class CodeParser:
         if is_ruby_singleton:
             method_extra["ruby_singleton"] = True
             if parent_name:
-                method_extra["ruby_owner_qn"] = self._qualify(parent_name, file_path, None)
+                method_extra["ruby_owner_qn"] = (
+                    self._ruby_owner_qn_stack[-1]
+                    if self._ruby_owner_qn_stack
+                    else self._qualify(parent_name, file_path, None)
+                )
             qualified = self._qualify(f"self.{name}", file_path, parent_name)
         else:
             qualified = self._qualify(name, file_path, parent_name)
             # Regular Ruby def inside a class: set ruby_owner_qn so the flows
             # bridge can look up ruby_role by the namespace-correct class qn.
             if language == "ruby" and parent_name:
-                method_extra["ruby_owner_qn"] = self._qualify(parent_name, file_path, None)
+                method_extra["ruby_owner_qn"] = (
+                    self._ruby_owner_qn_stack[-1]
+                    if self._ruby_owner_qn_stack
+                    else self._qualify(parent_name, file_path, None)
+                )
         params = self._get_params(child, language, source)
         ret_type = self._get_return_type(child, language, source)
 
@@ -5024,12 +5058,15 @@ class CodeParser:
         )
         nodes.append(node)
 
-        # CONTAINS edge
-        container = (
-            self._qualify(container_scope, file_path, None)
-            if container_scope
-            else file_path
-        )
+        # CONTAINS edge.
+        # For Ruby methods inside a class, use the stack qn so that children_of
+        # queries on the outer-namespaced class also work for nested classes.
+        if language == "ruby" and container_scope and self._ruby_owner_qn_stack:
+            container = self._ruby_owner_qn_stack[-1]
+        elif container_scope:
+            container = self._qualify(container_scope, file_path, None)
+        else:
+            container = file_path
         edges.append(EdgeInfo(
             kind="CONTAINS",
             source=container,

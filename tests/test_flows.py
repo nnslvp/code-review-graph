@@ -933,3 +933,62 @@ class TestFlows:
         eps = detect_entry_points(self.store, include_tests=False)
         ep_names = {e.name for e in eps}
         assert "perform" in ep_names
+
+
+def test_nested_service_call_ruby_owner_qn_matches_class_qn(tmp_path):
+    """Parser must set ruby_owner_qn on nested-class methods to the class node's
+    qualified_name (including the outer module prefix), not just file::ClassName.
+
+    Regression guard for the bug where _extract_functions computed ruby_owner_qn
+    as '<file>::UpdateSettings' while the Class node's qualified_name was
+    '<file>::Casinos.UpdateSettings', silently breaking the flows bridge.
+    """
+    from code_review_graph.incremental import full_build
+    from code_review_graph.parser import CodeParser
+
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".code-review-graph").mkdir()
+    services_dir = tmp_path / "app" / "services" / "casinos"
+    services_dir.mkdir(parents=True)
+    rb_file = services_dir / "update_settings.rb"
+    rb_file.write_text(
+        "module Casinos\n"
+        "  class UpdateSettings < BaseService\n"
+        "    def call\n"
+        "    end\n"
+        "    private\n"
+        "    def helper\n"
+        "    end\n"
+        "  end\n"
+        "end\n"
+    )
+
+    nodes, _edges = CodeParser().parse_file(rb_file)
+
+    class_nodes = [n for n in nodes if n.kind == "Class" and n.name == "UpdateSettings"]
+    assert class_nodes, "UpdateSettings Class node not found"
+    from code_review_graph.graph import GraphStore
+    store_path = str(tmp_path / ".code-review-graph" / "graph.db")
+    store = GraphStore(store_path)
+    full_build(tmp_path, store)
+
+    abs_path = str(rb_file)
+    class_node = store.get_node(f"{abs_path}::Casinos.UpdateSettings")
+    assert class_node is not None, "Class node with nested qn not found in store"
+    class_qn = class_node.qualified_name
+
+    # The call method's store qualified_name uses parent_name (simple "UpdateSettings"),
+    # so the store key is <file>::UpdateSettings.call — look it up that way.
+    call_node = store.get_node(f"{abs_path}::UpdateSettings.call")
+    assert call_node is not None, "call method node not found in store"
+    assert call_node.extra.get("ruby_owner_qn") == class_qn, (
+        f"ruby_owner_qn mismatch: got {call_node.extra.get('ruby_owner_qn')!r}, "
+        f"expected {class_qn!r}"
+    )
+
+    eps = detect_entry_points(store, include_tests=False)
+    ep_names = {e.name for e in eps}
+    assert "call" in ep_names, "call should be a service entry point"
+    assert "helper" not in ep_names, "private helper should not be an entry point"
+
+    store.close()

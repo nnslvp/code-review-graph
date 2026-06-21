@@ -563,7 +563,7 @@ def test_job_role_filter_only_perform_is_rails_entry(tmp_path):
     finally:
         store.close()
 
-    assert idx.get("ReportJob", {}).get("role") == "job"
+    assert idx["by_name"].get("ReportJob", {}).get("role") == "job"
     assert _is_rails_entry(perform, idx) is True
     # `build` is a public job method but not `perform` -> rejected by the
     # job-specific role filter.
