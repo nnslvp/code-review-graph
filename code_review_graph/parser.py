@@ -3751,10 +3751,12 @@ class CodeParser:
                         mname = self._get_name(member, language, "function")
                         if mname:
                             sc_extra: dict = {"ruby_singleton": True}
+                            class_qn = None
                             if enclosing_class:
-                                sc_extra["ruby_owner_qn"] = self._qualify(
+                                class_qn = self._qualify(
                                     enclosing_class, file_path, None
                                 )
+                                sc_extra["ruby_owner_qn"] = class_qn
                             sc_qn = self._qualify(
                                 f"self.{mname}", file_path, enclosing_class
                             )
@@ -3766,7 +3768,7 @@ class CodeParser:
                                 extra=sc_extra,
                             ))
                             edges.append(EdgeInfo(
-                                kind="CONTAINS", source=file_path,
+                                kind="CONTAINS", source=class_qn if class_qn else file_path,
                                 target=sc_qn,
                                 file_path=file_path, line=member.start_point[0] + 1,
                             ))

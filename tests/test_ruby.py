@@ -65,6 +65,28 @@ def test_singleton_and_instance_call_have_distinct_qns(tmp_path):
     assert any("self.call" in qn for qn in qns), f"Singleton qualname missing 'self.call': {qns}"
 
 
+def test_singleton_class_methods_owned_by_class(tmp_path):
+    f = tmp_path / "sc.rb"
+    f.write_text("class Bar\n  class << self\n    def helper\n    end\n  end\nend\n")
+
+    nodes, edges = CodeParser().parse_file(f)
+    helper_nodes = [n for n in nodes if n.kind == "Function" and n.name == "helper"]
+    assert len(helper_nodes) == 1, f"Expected 1 'helper' node, got {len(helper_nodes)}"
+
+    helper = helper_nodes[0]
+    assert helper.extra.get("ruby_singleton") is True, "helper should be marked as singleton"
+    assert helper.extra.get("ruby_owner_qn"), "helper should have ruby_owner_qn"
+    assert "Bar" in helper.extra["ruby_owner_qn"], f"ruby_owner_qn should contain Bar: {helper.extra['ruby_owner_qn']}"
+
+    helper_qn = f"{tmp_path / 'sc.rb'}::Bar.self.helper"
+    contains_edges = [e for e in edges if e.kind == "CONTAINS" and e.target == helper_qn]
+    assert len(contains_edges) == 1, f"Expected 1 CONTAINS edge to helper, got {len(contains_edges)}"
+
+    contains_edge = contains_edges[0]
+    assert contains_edge.source == helper.extra["ruby_owner_qn"], \
+        f"CONTAINS edge should be sourced from class qn, got {contains_edge.source} vs {helper.extra['ruby_owner_qn']}"
+
+
 def test_ruby_grammar_node_types_present():
     src = (Path(__file__).parent / "fixtures" / "ruby_golden.rb").read_bytes()
     root = tslp.get_parser("ruby").parse(src).root_node
