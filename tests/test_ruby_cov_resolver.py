@@ -614,3 +614,72 @@ def test_resolver_noop_on_repo_without_ruby(tmp_path):
     store = GraphStore(str(tmp_path / ".code-review-graph" / "graph.db"))
     full_build(tmp_path, store)
     assert resolve_ruby_cross_module(store) == {}
+
+
+# ---------------------------------------------------------------------------
+# 12) Member call on a NON-self receiver must not be qualified to a same-file
+#     method of the same name (false-edge guard). Found by real-repo validation:
+#     `dep.call` in a service object was being resolved to `Self.call`.
+# ---------------------------------------------------------------------------
+def test_member_call_on_local_receiver_not_qualified_to_same_file_method(tmp_path):
+    """A call ``local.call(...)`` where ``call`` is also a method defined in the
+    SAME class must NOT be qualified to that same-file method. The receiver is a
+    different object (commonly an injected dependency), so resolving by bare
+    method name would be a false edge. The target must stay bare and be marked
+    unresolved by the receiver-aware resolver.
+    """
+    _repo(tmp_path)
+    (tmp_path / "decorator.rb").write_text(
+        "class Decorator\n"
+        "  def call(params:)\n"
+        "    object.call(params: params)\n"
+        "  end\n"
+        "end\n"
+    )
+    store, _ = _build(tmp_path)
+    rb_file = str(tmp_path / "decorator.rb")
+    caller_qn = f"{rb_file}::Decorator.call"
+    rows = store._conn.execute(
+        "SELECT target_qualified, extra FROM edges"
+        " WHERE kind='CALLS' AND source_qualified=?",
+        (caller_qn,),
+    ).fetchall()
+    obj_calls = [
+        r for r in rows
+        if json.loads(r["extra"] or "{}").get("receiver") == "object"
+    ]
+    assert len(obj_calls) == 1, f"expected one object.call edge, got {[dict(r) for r in rows]}"
+    tgt = obj_calls[0]["target_qualified"]
+    assert tgt != f"{rb_file}::Decorator.call", (
+        "object.call must NOT be qualified to the same-file Decorator.call (false edge)"
+    )
+    assert tgt == "call", f"member call on a local receiver must stay bare, got {tgt}"
+    assert json.loads(obj_calls[0]["extra"] or "{}").get("unresolved") is True
+
+
+def test_self_method_call_resolves_to_same_class(tmp_path):
+    """``self.helper`` is a same-object call and MUST resolve to the same class's
+    method — the non-self-receiver guard must not suppress legitimate self calls.
+    """
+    _repo(tmp_path)
+    (tmp_path / "svc.rb").write_text(
+        "class Svc\n"
+        "  def run\n"
+        "    self.helper\n"
+        "  end\n"
+        "  def helper\n"
+        "  end\n"
+        "end\n"
+    )
+    store, _ = _build(tmp_path)
+    rb_file = str(tmp_path / "svc.rb")
+    caller_qn = f"{rb_file}::Svc.run"
+    targets = [
+        r["target_qualified"] for r in store._conn.execute(
+            "SELECT target_qualified FROM edges WHERE kind='CALLS' AND source_qualified=?",
+            (caller_qn,),
+        ).fetchall()
+    ]
+    assert f"{rb_file}::Svc.helper" in targets, (
+        f"self.helper must resolve to Svc.helper, got {targets}"
+    )

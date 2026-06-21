@@ -2213,9 +2213,19 @@ class CodeParser:
                 if bare not in symbols:
                     symbols[bare] = qualified
 
+        is_ruby = self.detect_language(Path(file_path)) == "ruby"
+
         resolved: list[EdgeInfo] = []
         for edge in edges:
             if edge.kind in ("CALLS", "REFERENCES") and "::" not in edge.target:
+                # Ruby member calls on an explicit non-self receiver carry a
+                # "receiver" key. Their method lives on the receiver's type, not
+                # in the current file's scope, so bare-name same-file symbol
+                # matching would create false edges. Defer them to the
+                # receiver-aware ruby_resolver post-pass.
+                if is_ruby and edge.extra.get("receiver"):
+                    resolved.append(edge)
+                    continue
                 if edge.target in symbols:
                     edge = EdgeInfo(
                         kind=edge.kind,
@@ -4067,15 +4077,34 @@ class CodeParser:
             and name in self._ALL_RUBY_CLASS_MACROS
         )
         if not is_class_direct_macro:
-            if receiver is not None:
+            receiver_text = (
+                receiver.text.decode("utf-8", "replace")
+                if receiver is not None else None
+            )
+            # `self.foo` is a same-object call: treat it as receiver-less so the
+            # ordinary same-file/self resolution applies.
+            explicit_receiver = receiver is not None and receiver_text != "self"
+            if explicit_receiver:
                 call_name = name
             else:
                 call_name = self._get_call_name(child, language, source) or name
             if call_name:
-                tgt = self._resolve_call_target(
-                    call_name, file_path, language,
-                    import_map or {}, defined_names or set(),
-                )
+                if explicit_receiver:
+                    # Member call on an explicit non-self receiver: the method
+                    # lives on the receiver's type, not the current file's scope.
+                    # Leave the target bare so the receiver-aware ruby_resolver
+                    # post-pass can do the correct lookup (mirrors the Java /
+                    # spring_resolver path). Qualifying it by bare method name
+                    # against same-file symbols would create false edges
+                    # (e.g. an injected `dep.call` resolving to `Self.call`).
+                    tgt = call_name
+                    call_extra: dict = {"receiver": receiver_text}
+                else:
+                    tgt = self._resolve_call_target(
+                        call_name, file_path, language,
+                        import_map or {}, defined_names or set(),
+                    )
+                    call_extra = {}
                 edges.append(EdgeInfo(
                     kind="CALLS",
                     source=self._qualify(enclosing_func, file_path, enclosing_class)
@@ -4083,8 +4112,7 @@ class CodeParser:
                     target=tgt,
                     file_path=file_path,
                     line=child.start_point[0] + 1,
-                    extra={"receiver": receiver.text.decode("utf-8", "replace")}
-                    if receiver else {},
+                    extra=call_extra,
                 ))
 
         # `included do` and `class_methods do` blocks are fully handled by

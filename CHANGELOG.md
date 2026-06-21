@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [2.5.1] - 2026-06-22
+
+### Fixed
+- Ruby CALLS: a member call on an explicit non-self receiver
+  (e.g. `dep.call`, `sanitizer.call`) is no longer qualified to a same-file
+  method of the same name. Both the parse-time qualifier (`_resolve_call_target`
+  in `_extract_ruby_constructs`) and the post-parse symbol-table qualifier
+  (`_resolve_call_targets`, Ruby-gated) now leave such targets bare so the
+  receiver-aware `ruby_resolver` post-pass handles them — it resolves only
+  constant receivers (tier-2) and leaves unknown locals/dependencies
+  unresolved. This removes false intra-class CALLS edges that were common in
+  service-object / decorator / DI patterns (`def call ... dep.call ...`).
+  `self.foo` is still resolved to the same class. Other languages are
+  unaffected (the post-parse change is gated to Ruby; the parse-time change is
+  inside the Ruby extractor). Found by real-repo validation on a real Rails app, where
+  it removed 56 false edges (21% of resolved CALLS) with zero loss of
+  legitimate resolutions.
+
 ## [2.5.0] - 2026-06-22
 
 ### Added
