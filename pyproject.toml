@@ -31,7 +31,9 @@ dependencies = [
     # from breaking the server the way fastmcp 3.0 did. See: #488
     "fastmcp>=3.2.4,<4",
     "tree-sitter>=0.23.0,<1",
-    "tree-sitter-language-pack>=0.3.0,<1",
+    # Ruby extraction depends on tree-sitter-ruby node types from the bundled grammar.
+    # Pin the minor version to detect grammar changes (required node types in parser.py).
+    "tree-sitter-language-pack>=0.13,<0.14",
     "networkx>=3.2,<4",
     "watchdog>=4.0.0,<6",
     "tomli>=2.0.0,<3; python_version < '3.11'",
