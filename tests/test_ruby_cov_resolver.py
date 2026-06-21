@@ -468,17 +468,15 @@ def test_bare_receiver_duplicate_class_stays_unresolved(tmp_path):
     assert "::" not in build_row["target_qualified"]
 
 
-def test_qualified_receiver_does_not_mis_resolve_to_wrong_namespace(tmp_path):
+def test_qualified_receiver_resolves_to_correct_namespace(tmp_path):
     """A fully-qualified receiver ``A::Builder.build`` (with a same-short-name
-    ``B::Builder`` also present) must NEVER be silently mis-resolved to the wrong
-    namespace's class. In this build the class qualified-name uses ``.`` as its
-    namespace separator (``...a.rb::A.Builder``) while the receiver string uses
-    ``::`` (``A::Builder``); the tier-2 suffix-match compares them and finds no
-    match, so the edge is left unresolved rather than wrongly bound to B.
+    ``B::Builder`` also present) must resolve to A's Builder and NEVER to B's.
 
-    This pins the safe-failure contract: ambiguity-prone qualified receivers
-    either resolve to the *correct* namespace or stay unresolved — never the
-    wrong one.
+    The graph stores namespace separators as "." (e.g. ``<file>::A.Builder``)
+    while the parser records the receiver with Ruby's "::" (``A::Builder``).
+    The tier-2 arm normalizes "::" -> "." before matching, so ``A::Builder``
+    matches exactly one class (A.Builder) and resolves correctly. B::Builder
+    (stored as B.Builder) does not match, so no ambiguity arises.
     """
     _repo(tmp_path)
     (tmp_path / "a.rb").write_text(
@@ -504,9 +502,47 @@ def test_qualified_receiver_does_not_mis_resolve_to_wrong_namespace(tmp_path):
     assert str(tmp_path / "b.rb") not in edge["target_qualified"], (
         f"A::Builder.build must never resolve to B's Builder; got {edge['target_qualified']}"
     )
-    # In this build format the safe outcome is: left unresolved, not ruby_resolved.
-    assert extra.get("unresolved") is True
-    assert not extra.get("ruby_resolved")
+    # Must resolve to A's Builder singleton build method.
+    assert str(tmp_path / "a.rb") in edge["target_qualified"], (
+        f"A::Builder.build must resolve to A's Builder; got {edge['target_qualified']}"
+    )
+    assert "self.build" in edge["target_qualified"] or "build" in edge["target_qualified"], (
+        f"resolved target must contain 'build'; got {edge['target_qualified']}"
+    )
+    assert extra.get("ruby_resolved") is True
+    assert edge["confidence_tier"] == "INFERRED"
+
+
+def test_qualified_receiver_resolves_single_namespace(tmp_path):
+    """Positive test: ``A::Builder.build`` in a repo where only A::Builder exists
+    resolves to A's Builder singleton method (ruby_resolved=True, INFERRED).
+    """
+    _repo(tmp_path)
+    (tmp_path / "a.rb").write_text(
+        "module A\n  class Builder\n    def self.build; end\n  end\nend\n"
+    )
+    (tmp_path / "b.rb").write_text(
+        "module X\n  class Caller\n    def run\n      A::Builder.build\n    end\n  end\nend\n"
+    )
+    store, _ = _build(tmp_path)
+    conn = _conn(tmp_path)
+    rows = _edges(conn, "kind='CALLS' AND source_qualified LIKE '%Caller.run'")
+    build_row = next(
+        (r for r in rows
+         if json.loads(r["extra"] or "{}").get("receiver") == "A::Builder"),
+        None,
+    )
+    assert build_row is not None, (
+        f"expected a CALLS edge with receiver='A::Builder'; got {[dict(r) for r in rows]}"
+    )
+    extra = json.loads(build_row["extra"] or "{}")
+    assert extra.get("ruby_resolved") is True, (
+        f"A::Builder.build must be ruby_resolved; extra={extra}"
+    )
+    assert build_row["confidence_tier"] == "INFERRED"
+    assert str(tmp_path / "a.rb") in build_row["target_qualified"], (
+        f"must resolve into a.rb; got {build_row['target_qualified']}"
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -182,20 +182,27 @@ def resolve_ruby_cross_module(store: "GraphStore") -> dict:
             # Key by qualified name — no collision risk here
             bucket = member_index.setdefault(class_qn, {"instance": {}, "singleton": {}})
             bare_to_class_qns.setdefault(class_bare, []).append(class_qn)
-            for member_row in conn.execute(
-                "SELECT n.qualified_name, n.name, n.extra"
-                " FROM edges e JOIN nodes n ON n.qualified_name = e.target_qualified"
-                " WHERE e.kind='CONTAINS' AND e.source_qualified=?"
-                "   AND n.kind='Function' AND n.language='ruby'",
-                (class_qn,),
-            ).fetchall():
-                extra_m = json.loads(member_row["extra"] or "{}")
-                is_singleton = extra_m.get("ruby_singleton", False)
-                mname = member_row["name"]
-                mqn = member_row["qualified_name"]
-                tier = "singleton" if is_singleton else "instance"
-                if mname not in bucket[tier]:
-                    bucket[tier][mname] = mqn
+            # The parser may emit CONTAINS edges from a bare-name source
+            # (e.g. "<file>::Builder") even when the class node is namespace-qualified
+            # (e.g. "<file>::A.Builder"). Build the bare-source qn as a fallback.
+            file_prefix = class_qn.split("::", 1)[0] if "::" in class_qn else ""
+            bare_source_qn = f"{file_prefix}::{class_bare}" if file_prefix else class_bare
+            sources_to_check = {class_qn, bare_source_qn}
+            for source_qn in sources_to_check:
+                for member_row in conn.execute(
+                    "SELECT n.qualified_name, n.name, n.extra"
+                    " FROM edges e JOIN nodes n ON n.qualified_name = e.target_qualified"
+                    " WHERE e.kind='CONTAINS' AND e.source_qualified=?"
+                    "   AND n.kind='Function' AND n.language='ruby'",
+                    (source_qn,),
+                ).fetchall():
+                    extra_m = json.loads(member_row["extra"] or "{}")
+                    is_singleton = extra_m.get("ruby_singleton", False)
+                    mname = member_row["name"]
+                    mqn = member_row["qualified_name"]
+                    tier = "singleton" if is_singleton else "instance"
+                    if mname not in bucket[tier]:
+                        bucket[tier][mname] = mqn
 
         # Process bare CALLS edges (no '::' in target_qualified).
         # Join through nodes to restrict to ruby-language callers only, so we
@@ -247,16 +254,20 @@ def resolve_ruby_cross_module(store: "GraphStore") -> dict:
                 # If bare (no "::"), look up bare_to_class_qns; resolve ONLY when unique.
                 resolved_class_qn: str | None = None
                 if "::" in receiver:
-                    # Fully-qualified receiver: find a class_qn that ends with the receiver
-                    # or whose bare qualified suffix matches.
+                    # Fully-qualified receiver: find a class_qn that ends with the receiver.
+                    # The graph stores qualified names using "." as the namespace separator
+                    # (e.g. "<file>::A.Builder"), while the parser records the receiver with
+                    # Ruby's "::" separator (e.g. "A::Builder"). Normalize before comparing.
+                    receiver_dot = receiver.replace("::", ".")
+                    qualified_matches: list[str] = []
                     for cqn in member_index:
-                        # Match by the file-stripped portion: "path::A::B::ClassName"
-                        # Check if the graph qn's namespace portion ends with the receiver.
-                        # The class qn format is "<file>::<NamespacedClass>"; strip file prefix.
+                        # Strip the file-path prefix to get the namespace tail, e.g. "A.Builder".
                         ns_part = cqn.split("::", 1)[-1] if "::" in cqn else cqn
-                        if ns_part == receiver or ns_part.endswith("::" + receiver):
-                            resolved_class_qn = cqn
-                            break
+                        if ns_part == receiver_dot or ns_part.endswith("." + receiver_dot):
+                            qualified_matches.append(cqn)
+                    # Resolve only when exactly one class matches — preserve uniqueness gate.
+                    if len(qualified_matches) == 1:
+                        resolved_class_qn = qualified_matches[0]
                 else:
                     # Bare receiver: only resolve if exactly one class has this name
                     candidates = bare_to_class_qns.get(receiver, [])
