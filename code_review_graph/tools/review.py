@@ -17,6 +17,21 @@ from ._common import _get_store, _resolve_graph_file_paths
 logger = logging.getLogger(__name__)
 
 
+def _count_inferred_edges(store: Any, changed_functions: list[dict[str, Any]]) -> int:
+    """Count outgoing edges with confidence_tier == 'INFERRED' for changed functions."""
+    count = 0
+    seen: set[int] = set()
+    for func in changed_functions:
+        qn = func.get("qualified_name", "")
+        if not qn:
+            continue
+        for e in store.get_edges_by_source(qn):
+            if e.id not in seen and e.confidence_tier == "INFERRED":
+                count += 1
+                seen.add(e.id)
+    return count
+
+
 # ---------------------------------------------------------------------------
 # Tool 4: get_review_context
 # ---------------------------------------------------------------------------
@@ -447,6 +462,11 @@ def detect_changes_func(
                         except (OSError, UnicodeDecodeError):
                             func["source"] = "(could not read file)"
 
+        # Count edges with INFERRED confidence among changed functions.
+        inferred_edge_count = _count_inferred_edges(
+            store, analysis.get("changed_functions", [])
+        )
+
         if detail_level == "minimal":
             priorities = analysis.get("review_priorities", [])
             top_priorities = [
@@ -460,11 +480,13 @@ def detect_changes_func(
                 "changed_file_count": len(changed_files),
                 "test_gap_count": len(analysis.get("test_gaps", [])),
                 "review_priorities": top_priorities,
+                "inferred_edge_count": inferred_edge_count,
             }
         else:
             result = {
                 "status": "ok",
                 "changed_files": changed_files,
+                "inferred_edge_count": inferred_edge_count,
                 **analysis,
             }
         result["_hints"] = generate_hints(

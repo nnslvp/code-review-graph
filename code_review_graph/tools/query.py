@@ -235,7 +235,9 @@ def query_graph(
                         seen_sources.add(e.source_qualified)
                         caller = store.get_node(e.source_qualified)
                         if caller:
-                            results.append(node_to_dict(caller))
+                            d = node_to_dict(caller)
+                            d["confidence_tier"] = e.confidence_tier
+                            results.append(d)
                         edges_out.append(edge_to_dict(e))
             # Fallback: CALLS edges store unqualified target names
             # (e.g. "generateTestCode") while qn is fully qualified
@@ -246,7 +248,9 @@ def query_graph(
                         seen_sources.add(e.source_qualified)
                         caller = store.get_node(e.source_qualified)
                         if caller:
-                            results.append(node_to_dict(caller))
+                            d = node_to_dict(caller)
+                            d["confidence_tier"] = e.confidence_tier
+                            results.append(d)
                         edges_out.append(edge_to_dict(e))
 
         elif pattern == "callees_of":
@@ -257,12 +261,16 @@ def query_graph(
                         seen_targets.add(e.target_qualified)
                         callee = store.get_node(e.target_qualified)
                         if callee:
-                            results.append(node_to_dict(callee))
+                            d = node_to_dict(callee)
+                            d["confidence_tier"] = e.confidence_tier
+                            results.append(d)
                         elif "::" not in e.target_qualified:
                             results.append({
                                 "kind": "Function",
                                 "name": e.target_qualified,
                                 "qualified_name": e.target_qualified,
+                                "confidence_tier": e.confidence_tier,
+                                "unresolved": True,
                             })
                         edges_out.append(edge_to_dict(e))
 
@@ -305,7 +313,10 @@ def query_graph(
                 if e.kind == "TESTED_BY":
                     test = store.get_node(e.source_qualified)
                     if test:
-                        results.append(node_to_dict(test))
+                        d = node_to_dict(test)
+                        d["confidence_tier"] = e.confidence_tier
+                        results.append(d)
+                        edges_out.append(edge_to_dict(e))
             # Also search by naming convention
             name = node.name if node else target
             test_nodes = store.search_nodes(f"test_{name}", limit=10)
@@ -337,22 +348,34 @@ def query_graph(
             for e in store.get_edges_by_source(qn):
                 if e.kind in ("INCLUDES", "EXTENDS", "PREPENDS"):
                     mod = store.get_node(e.target_qualified)
-                    results.append(
-                        node_to_dict(mod) if mod
-                        else {"qualified_name": e.target_qualified,
-                              "mixin_kind": e.kind}
-                    )
+                    if mod:
+                        d = node_to_dict(mod)
+                        d["confidence_tier"] = e.confidence_tier
+                        results.append(d)
+                    else:
+                        results.append({
+                            "qualified_name": e.target_qualified,
+                            "mixin_kind": e.kind,
+                            "confidence_tier": e.confidence_tier,
+                            "unresolved": "::" not in e.target_qualified,
+                        })
                     edges_out.append(edge_to_dict(e))
 
         elif pattern == "associations_of":
             for e in store.get_edges_by_source(qn):
                 if e.kind == "ASSOCIATES":
                     model = store.get_node(e.target_qualified)
-                    results.append(
-                        node_to_dict(model) if model
-                        else {"qualified_name": e.target_qualified,
-                              "association": (e.extra or {}).get("association")}
-                    )
+                    if model:
+                        d = node_to_dict(model)
+                        d["confidence_tier"] = e.confidence_tier
+                        results.append(d)
+                    else:
+                        results.append({
+                            "qualified_name": e.target_qualified,
+                            "association": (e.extra or {}).get("association"),
+                            "confidence_tier": e.confidence_tier,
+                            "unresolved": "::" not in e.target_qualified,
+                        })
                     edges_out.append(edge_to_dict(e))
 
         elif pattern == "file_summary":
@@ -370,10 +393,18 @@ def query_graph(
             minimal_results = [
                 {
                     k: r[k]
-                    for k in ("name", "kind", "file_path")
+                    for k in ("name", "kind", "file_path", "confidence_tier", "unresolved")
                     if k in r
                 }
                 for r in results[:5]
+            ]
+            minimal_edges = [
+                {
+                    k: e[k]
+                    for k in ("kind", "source", "target", "confidence_tier")
+                    if k in e
+                }
+                for e in edges_out[:5]
             ]
             return {
                 "status": "ok",
@@ -383,6 +414,7 @@ def query_graph(
                 "summary": summary,
                 "result_count": len(results),
                 "results": minimal_results,
+                "edges": minimal_edges,
             }
 
         return {

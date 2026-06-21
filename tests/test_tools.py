@@ -1629,3 +1629,152 @@ class TestGetMinimalContext:
             task="refactor auth module", repo_root=str(self.root),
         )
         assert "refactor" in result["next_tool_suggestions"]
+
+
+class TestConfidenceTierSurfacing:
+    """Task 4 (C1): confidence_tier + unresolved must appear in all agent-facing output."""
+
+    def setup_method(self):
+        import shutil
+        self.tmp_dir = tempfile.mkdtemp()
+        self.root = Path(self.tmp_dir).resolve()
+        (self.root / ".git").mkdir()
+        (self.root / ".code-review-graph").mkdir()
+        self.db_path = str(self.root / ".code-review-graph" / "graph.db")
+        self.model_file = str(self.root / "user.rb")
+        self.mixin_file = str(self.root / "comparable.rb")
+        self.caller_file = str(self.root / "caller.rb")
+        self._seed_data()
+
+    def teardown_method(self):
+        import shutil
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def _seed_data(self):
+        with GraphStore(self.db_path) as store:
+            store.upsert_node(NodeInfo(
+                kind="Class", name="User", file_path=self.model_file,
+                line_start=1, line_end=10, language="ruby",
+            ))
+            store.upsert_node(NodeInfo(
+                kind="Class", name="Comparable", file_path=self.mixin_file,
+                line_start=1, line_end=5, language="ruby",
+            ))
+            store.upsert_node(NodeInfo(
+                kind="Function", name="process", file_path=self.caller_file,
+                line_start=1, line_end=5, language="ruby",
+            ))
+            store.upsert_node(NodeInfo(
+                kind="Function", name="do_thing", file_path=self.model_file,
+                line_start=2, line_end=4, language="ruby",
+            ))
+            store.upsert_edge(EdgeInfo(
+                kind="INCLUDES",
+                source=f"{self.model_file}::User",
+                target=f"{self.mixin_file}::Comparable",
+                file_path=self.model_file, line=1,
+                extra={"confidence_tier": "INFERRED"},
+            ))
+            store.upsert_edge(EdgeInfo(
+                kind="CALLS",
+                source=f"{self.caller_file}::process",
+                target=f"{self.model_file}::do_thing",
+                file_path=self.caller_file, line=2,
+                extra={"confidence_tier": "INFERRED"},
+            ))
+            store.upsert_edge(EdgeInfo(
+                kind="CALLS",
+                source=f"{self.model_file}::do_thing",
+                target="bare_helper",
+                file_path=self.model_file, line=3,
+                extra={"confidence_tier": "INFERRED"},
+            ))
+            store.commit()
+
+    def test_query_graph_surfaces_confidence_tier_in_edges(self):
+        res = query_graph(
+            pattern="mixins_of",
+            target=f"{self.model_file}::User",
+            repo_root=str(self.root),
+        )
+        assert res["status"] == "ok"
+        assert res["edges"][0]["confidence_tier"] == "INFERRED"
+
+    def test_query_graph_minimal_includes_edges_with_confidence_tier(self):
+        res = query_graph(
+            pattern="mixins_of",
+            target=f"{self.model_file}::User",
+            repo_root=str(self.root),
+            detail_level="minimal",
+        )
+        assert res["status"] == "ok"
+        assert "edges" in res, "minimal output must include edges for confidence surfacing"
+        assert len(res["edges"]) >= 1
+        assert res["edges"][0]["confidence_tier"] == "INFERRED"
+
+    def test_query_graph_node_results_annotated_with_confidence_tier(self):
+        res = query_graph(
+            pattern="mixins_of",
+            target=f"{self.model_file}::User",
+            repo_root=str(self.root),
+        )
+        assert res["status"] == "ok"
+        assert len(res["results"]) == 1
+        result_node = res["results"][0]
+        assert "confidence_tier" in result_node, (
+            "node result in mixins_of must be annotated with edge confidence_tier"
+        )
+        assert result_node["confidence_tier"] == "INFERRED"
+
+    def test_query_graph_callers_of_annotated_with_confidence_tier(self):
+        res = query_graph(
+            pattern="callers_of",
+            target=f"{self.model_file}::do_thing",
+            repo_root=str(self.root),
+        )
+        assert res["status"] == "ok"
+        assert len(res["results"]) >= 1
+        result_node = res["results"][0]
+        assert "confidence_tier" in result_node, (
+            "node result in callers_of must be annotated with edge confidence_tier"
+        )
+        assert result_node["confidence_tier"] == "INFERRED"
+
+    def test_query_graph_callees_of_annotated_with_confidence_tier(self):
+        res = query_graph(
+            pattern="callees_of",
+            target=f"{self.model_file}::do_thing",
+            repo_root=str(self.root),
+        )
+        assert res["status"] == "ok"
+        assert len(res["results"]) >= 1
+        result_node = res["results"][0]
+        assert "confidence_tier" in result_node, (
+            "node result in callees_of must be annotated with edge confidence_tier"
+        )
+        assert result_node["confidence_tier"] == "INFERRED"
+
+    def test_query_graph_callees_of_bare_target_flagged_unresolved(self):
+        res = query_graph(
+            pattern="callees_of",
+            target=f"{self.model_file}::do_thing",
+            repo_root=str(self.root),
+        )
+        assert res["status"] == "ok"
+        bare = [r for r in res["results"] if r.get("name") == "bare_helper"]
+        assert len(bare) == 1, "bare-name callee must appear in results"
+        assert bare[0].get("unresolved") is True, (
+            "bare-name callees (no '::' in target) must be flagged unresolved: true"
+        )
+
+    def test_detect_changes_exposes_inferred_edge_count(self):
+        from code_review_graph.tools.review import detect_changes_func
+
+        res = detect_changes_func(
+            changed_files=[self.caller_file],
+            repo_root=str(self.root),
+        )
+        assert res["status"] == "ok"
+        assert "inferred_edge_count" in res, (
+            "detect_changes must include inferred_edge_count to surface confidence gaps"
+        )
