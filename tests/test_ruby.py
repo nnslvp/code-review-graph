@@ -35,6 +35,36 @@ def test_member_call_targets_method_not_receiver(tmp_path):
     assert "user" not in targets  # receiver/local must not be a call target
 
 
+def test_singleton_and_instance_call_have_distinct_qns(tmp_path):
+    import sqlite3
+
+    from code_review_graph.graph import GraphStore
+    from code_review_graph.incremental import full_build
+
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".code-review-graph").mkdir()
+    f = tmp_path / "s.rb"
+    f.write_text("class Foo\n  def self.call; end\n  def call; end\nend\n")
+
+    nodes, edges = CodeParser().parse_file(f)
+    call_nodes = [n for n in nodes if n.kind == "Function" and n.name == "call"]
+    assert len(call_nodes) == 2, f"Expected 2 'call' nodes, got {len(call_nodes)}"
+    singleton = [n for n in call_nodes if n.extra.get("ruby_singleton")]
+    instance = [n for n in call_nodes if not n.extra.get("ruby_singleton")]
+    assert len(singleton) == 1, "Expected exactly one singleton call node"
+    assert len(instance) == 1, "Expected exactly one instance call node"
+
+    store = GraphStore(str(tmp_path / ".code-review-graph" / "graph.db"))
+    full_build(tmp_path, store)
+    conn = sqlite3.connect(str(tmp_path / ".code-review-graph" / "graph.db"))
+    rows = conn.execute(
+        "SELECT qualified_name, name, extra FROM nodes WHERE name='call' AND kind='Function'"
+    ).fetchall()
+    assert len(rows) == 2, f"Both call methods must survive in store; got {rows}"
+    qns = {r[0] for r in rows}
+    assert any("self.call" in qn for qn in qns), f"Singleton qualname missing 'self.call': {qns}"
+
+
 def test_ruby_grammar_node_types_present():
     src = (Path(__file__).parent / "fixtures" / "ruby_golden.rb").read_bytes()
     root = tslp.get_parser("ruby").parse(src).root_node

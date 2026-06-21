@@ -1296,9 +1296,12 @@ class GraphStore:
     def _make_qualified(self, node: NodeInfo) -> str:
         if node.kind == "File":
             return node.file_path
+        name = node.name
+        if node.extra.get("ruby_singleton"):
+            name = f"self.{name}"
         if node.parent_name:
-            return f"{node.file_path}::{node.parent_name}.{node.name}"
-        return f"{node.file_path}::{node.name}"
+            return f"{node.file_path}::{node.parent_name}.{name}"
+        return f"{node.file_path}::{name}"
 
     def _row_to_node(self, row: sqlite3.Row) -> GraphNode:
         return GraphNode(

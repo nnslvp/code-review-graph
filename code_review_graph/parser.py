@@ -3750,16 +3750,24 @@ class CodeParser:
                     if member.type == "method":
                         mname = self._get_name(member, language, "function")
                         if mname:
+                            sc_extra: dict = {"ruby_singleton": True}
+                            if enclosing_class:
+                                sc_extra["ruby_owner_qn"] = self._qualify(
+                                    enclosing_class, file_path, None
+                                )
+                            sc_qn = self._qualify(
+                                f"self.{mname}", file_path, enclosing_class
+                            )
                             nodes.append(NodeInfo(
                                 kind="Function", name=mname, file_path=file_path,
                                 line_start=member.start_point[0] + 1,
                                 line_end=member.end_point[0] + 1,
                                 language=language, parent_name=enclosing_class,
-                                extra={"ruby_singleton": True},
+                                extra=sc_extra,
                             ))
                             edges.append(EdgeInfo(
                                 kind="CONTAINS", source=file_path,
-                                target=self._qualify(mname, file_path, enclosing_class),
+                                target=sc_qn,
                                 file_path=file_path, line=member.start_point[0] + 1,
                             ))
                             self._extract_from_tree(
@@ -4881,14 +4889,24 @@ class CodeParser:
             parent_name = enclosing_func
             container_scope = enclosing_func
 
-        qualified = self._qualify(name, file_path, parent_name)
+        # Ruby singleton methods (``def self.foo``) need a distinct qualname so
+        # they don't collide with same-named instance methods in the store.
+        # We qualify using ``self.{name}`` as the effective method name, giving
+        # ``file::Foo.self.call`` vs ``file::Foo.call``.  node.name stays bare
+        # so display/search are unaffected.  ruby_owner_qn bridges children_of.
+        method_extra: dict = {}
+        is_ruby_singleton = language == "ruby" and child.type == "singleton_method"
+        if is_ruby_singleton:
+            method_extra["ruby_singleton"] = True
+            if parent_name:
+                method_extra["ruby_owner_qn"] = self._qualify(parent_name, file_path, None)
+            qualified = self._qualify(f"self.{name}", file_path, parent_name)
+        else:
+            qualified = self._qualify(name, file_path, parent_name)
         params = self._get_params(child, language, source)
         ret_type = self._get_return_type(child, language, source)
 
         # Java: detect Temporal method-level annotations and Kafka listeners
-        method_extra: dict = {}
-        if language == "ruby" and child.type == "singleton_method":
-            method_extra["ruby_singleton"] = True
         if language == "java" and deco_list:
             temporal_method_annots = [
                 a for a in deco_list if a in _TEMPORAL_METHOD_ANNOTATIONS
