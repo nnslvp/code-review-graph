@@ -113,6 +113,36 @@ def _const_from_block(block_node) -> str | None:
     return None
 
 
+def _find_register_calls(node, key_map: dict[str, str]) -> None:
+    """Recursively walk *node* and populate *key_map* with ``register('k') { C }`` entries."""
+    if node.type == "call":
+        method = node.child_by_field_name("method")
+        if method is not None and method.text == b"register":
+            args = node.child_by_field_name("arguments")
+            block = None
+            for child in node.children:
+                if child.type in ("block", "do_block"):
+                    block = child
+                    break
+            if args is not None and block is not None:
+                key_str: str | None = None
+                for arg in args.children:
+                    if arg.type == "string":
+                        for sc in arg.children:
+                            if sc.type == "string_content":
+                                key_str = sc.text.decode("utf-8", errors="replace")
+                                break
+                        if key_str is not None:
+                            break
+                if key_str is not None:
+                    const_name = _const_from_block(block)
+                    if const_name is not None:
+                        key_map[key_str] = const_name
+            return
+    for child in node.children:
+        _find_register_calls(child, key_map)
+
+
 def _build_container_key_map(files: list[str]) -> dict[str, str]:
     """Scan Ruby files that include Dry::Container::Mixin and build key -> constant map.
 
@@ -144,53 +174,96 @@ def _build_container_key_map(files: list[str]) -> dict[str, str]:
             continue
 
         tree = parser.parse(source)
-
-        def _find_register_calls(node) -> None:  # type: ignore[return]
-            if node.type == "call":
-                method = node.child_by_field_name("method")
-                if method is not None and method.text == b"register":
-                    args = node.child_by_field_name("arguments")
-                    block = None
-                    for child in node.children:
-                        if child.type in ("block", "do_block"):
-                            block = child
-                            break
-                    if args is not None and block is not None:
-                        key_str: str | None = None
-                        for arg in args.children:
-                            if arg.type == "string":
-                                for sc in arg.children:
-                                    if sc.type == "string_content":
-                                        key_str = sc.text.decode("utf-8", errors="replace")
-                                        break
-                                if key_str is not None:
-                                    break
-                        if key_str is not None:
-                            const_name = _const_from_block(block)
-                            if const_name is not None:
-                                key_map[key_str] = const_name
-                    return
-            for child in node.children:
-                _find_register_calls(child)
-
-        _find_register_calls(tree.root_node)
+        _find_register_calls(tree.root_node, key_map)
 
     return key_map
+
+
+def _qn_to_ruby_full_path(qn: str) -> str:
+    """Derive the full Ruby constant path from a node qualified_name.
+
+    A node qn has the form ``<file_path>::A.B.Logger``.  The namespace
+    portion after the first ``::`` uses ``.`` as separator; convert that
+    to Ruby's ``::`` notation → ``A::B::Logger``.
+    """
+    if "::" not in qn:
+        return ""
+    ns_part = qn.split("::", 1)[1]
+    return ns_part.replace(".", "::")
+
+
+def _build_di_const_indexes(
+    conn,
+) -> tuple[dict[str, str], dict[str, list[str]]]:
+    """Return (full_path_to_qn, bare_name_to_qns) for Ruby Class/Type nodes.
+
+    full_path_to_qn maps e.g. ``Logging::Logger`` -> ``<file>::Logging.Logger``.
+    bare_name_to_qns maps e.g. ``Logger`` -> [``<file>::Logging.Logger``, ...].
+    """
+    full_path_to_qn: dict[str, str] = {}
+    bare_name_to_qns: dict[str, list[str]] = {}
+
+    for row in conn.execute(
+        "SELECT qualified_name, name FROM nodes"
+        " WHERE language='ruby' AND kind IN ('Class', 'Type')"
+    ).fetchall():
+        qn: str = row["qualified_name"]
+        bare: str = row["name"]
+        full_path = _qn_to_ruby_full_path(qn)
+        if full_path:
+            full_path_to_qn[full_path] = qn
+        bare_name_to_qns.setdefault(bare, []).append(qn)
+
+    return full_path_to_qn, bare_name_to_qns
+
+
+def _resolve_const_to_node(
+    const_name: str,
+    full_path_to_qn: dict[str, str],
+    bare_name_to_qns: dict[str, list[str]],
+) -> str | None:
+    """Resolve a Ruby constant string to a node qualified_name.
+
+    Resolution order:
+    1. Exact full-path match: const_name == full_path key (e.g. ``Logging::Logger``).
+    2. Suffix full-path match: any full_path ends with ``"::" + const_name``
+       (handles partially-qualified references like ``Logger`` matching ``Logging::Logger``
+       only when that suffix is unambiguous).
+    3. Bare-name fallback: if const_name contains no ``::`` and exactly one class has
+       that bare name, resolve to it.
+    4. Otherwise omit (returns None — no false edges).
+    """
+    if exact := full_path_to_qn.get(const_name):
+        return exact
+
+    suffix = "::" + const_name
+    suffix_matches = [qn for fp, qn in full_path_to_qn.items() if fp.endswith(suffix)]
+    if len(suffix_matches) == 1:
+        return suffix_matches[0]
+
+    if "::" not in const_name:
+        candidates = bare_name_to_qns.get(const_name, [])
+        if len(candidates) == 1:
+            return candidates[0]
+
+    return None
 
 
 def _resolve_di_imports(
     store: "GraphStore",
     key_map: dict[str, str],
-    const_to_qn: dict[str, str],
+    full_path_to_qn: dict[str, str],
+    bare_name_to_qns: dict[str, list[str]],
 ) -> int:
     """Emit DEPENDS_ON edges for classes with extra['di_keys'] resolved via key_map.
 
     For each class node that has di_keys set (populated by the parser when it sees
     include Ns::Import['k1','k2',...]), look up each key in key_map to get a
-    Ruby constant name, then resolve that constant to a qualified node name via
-    const_to_qn (built from the ruby Class/Type node index). Emit a DEPENDS_ON
-    edge with INFERRED confidence tier. Keys not found in key_map, or constants
-    not found in const_to_qn, are silently omitted (never convention-guessed).
+    Ruby constant name, then resolve that constant to a qualified node name using
+    the full-path index (exact or suffix match) with bare-name fallback only when
+    the name is unique. Emit a DEPENDS_ON edge with INFERRED confidence tier. Keys
+    not found in key_map, or constants not resolvable unambiguously, are silently
+    omitted (never convention-guessed, never picked arbitrarily).
 
     Returns the number of DEPENDS_ON edges emitted.
     """
@@ -215,10 +288,7 @@ def _resolve_di_imports(
             const_name = key_map.get(key)
             if const_name is None:
                 continue
-            target_qn = const_to_qn.get(const_name)
-            if target_qn is None:
-                last_seg = const_name.rsplit("::", 1)[-1]
-                target_qn = const_to_qn.get(last_seg)
+            target_qn = _resolve_const_to_node(const_name, full_path_to_qn, bare_name_to_qns)
             if target_qn is None:
                 continue
             edge_extra = json.dumps({"confidence_tier": "INFERRED", "di_key": key})
@@ -292,7 +362,10 @@ def resolve_ruby_cross_module(store: "GraphStore") -> dict:
     try:
         container_key_map = _build_container_key_map(files)
         if container_key_map:
-            stats["di_edges_emitted"] = _resolve_di_imports(store, container_key_map, const_to_qn)
+            full_path_to_qn, bare_name_to_qns = _build_di_const_indexes(conn)
+            stats["di_edges_emitted"] = _resolve_di_imports(
+                store, container_key_map, full_path_to_qn, bare_name_to_qns
+            )
     except Exception:
         logger.exception("ruby_resolver: DI resolution failed")
 

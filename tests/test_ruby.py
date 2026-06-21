@@ -445,3 +445,214 @@ def test_rspec_test_nodes_created_in_spec_files(tmp_path):
     assert len(test_nodes) >= 1, (
         f"Spec file should create Test nodes; got: {[n.name for n in nodes]}"
     )
+
+
+def test_di_namespaced_constant_resolves_to_correct_node(tmp_path):
+    """Namespaced positive: container body 'Logging::Logger.new' resolves to the
+    Logging::Logger class node, not any other Logger class, tier == INFERRED.
+    """
+    import sqlite3
+
+    from code_review_graph.graph import GraphStore
+    from code_review_graph.incremental import full_build
+
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "app").mkdir()
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".code-review-graph").mkdir()
+
+    (tmp_path / "lib" / "container.rb").write_text(
+        "class Container\n"
+        "  include Dry::Container::Mixin\n"
+        "  register('core.logger') { Logging::Logger.new }\n"
+        "end\n"
+    )
+    (tmp_path / "app" / "logging_logger.rb").write_text(
+        "module Logging\n  class Logger; end\nend\n"
+    )
+    (tmp_path / "app" / "svc.rb").write_text(
+        "class Svc\n  include App::Import['core.logger']\nend\n"
+    )
+
+    s = GraphStore(str(tmp_path / ".code-review-graph" / "graph.db"))
+    full_build(tmp_path, s)
+
+    conn = sqlite3.connect(str(tmp_path / ".code-review-graph" / "graph.db"))
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT target_qualified, confidence_tier FROM edges WHERE kind='DEPENDS_ON'"
+    ).fetchall()
+
+    assert any(
+        "Logging" in r["target_qualified"] and "Logger" in r["target_qualified"]
+        for r in rows
+    ), f"Expected DEPENDS_ON to Logging::Logger node; got: {[r['target_qualified'] for r in rows]}"
+
+    for r in rows:
+        if "Logging" in r["target_qualified"] and "Logger" in r["target_qualified"]:
+            assert r["confidence_tier"] == "INFERRED", (
+                f"Expected INFERRED tier, got {r['confidence_tier']}"
+            )
+
+
+def test_di_bare_constant_body_resolves(tmp_path):
+    """Bare constant body: register('core.notifier') { ErrorNotifier } resolves to ErrorNotifier."""
+    import sqlite3
+
+    from code_review_graph.graph import GraphStore
+    from code_review_graph.incremental import full_build
+
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "app").mkdir()
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".code-review-graph").mkdir()
+
+    (tmp_path / "lib" / "container.rb").write_text(
+        "class Container\n"
+        "  include Dry::Container::Mixin\n"
+        "  register('core.notifier') { ErrorNotifier }\n"
+        "end\n"
+    )
+    (tmp_path / "app" / "error_notifier.rb").write_text(
+        "class ErrorNotifier; end\n"
+    )
+    (tmp_path / "app" / "svc.rb").write_text(
+        "class Svc\n  include App::Import['core.notifier']\nend\n"
+    )
+
+    s = GraphStore(str(tmp_path / ".code-review-graph" / "graph.db"))
+    full_build(tmp_path, s)
+
+    conn = sqlite3.connect(str(tmp_path / ".code-review-graph" / "graph.db"))
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT target_qualified FROM edges WHERE kind='DEPENDS_ON'"
+    ).fetchall()
+
+    assert any(
+        "ErrorNotifier" in r["target_qualified"] for r in rows
+    ), f"Expected DEPENDS_ON to ErrorNotifier; got: {[r['target_qualified'] for r in rows]}"
+
+
+def test_di_collision_bare_name_not_resolved(tmp_path):
+    """Collision: two classes named Logger in different namespaces (A::Logger, B::Logger).
+    A container key whose body is bare 'Logger' must NOT create a DEPENDS_ON edge.
+    """
+    import sqlite3
+
+    from code_review_graph.graph import GraphStore
+    from code_review_graph.incremental import full_build
+
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "app").mkdir()
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".code-review-graph").mkdir()
+
+    (tmp_path / "lib" / "container.rb").write_text(
+        "class Container\n"
+        "  include Dry::Container::Mixin\n"
+        "  register('core.logger') { Logger }\n"
+        "end\n"
+    )
+    (tmp_path / "app" / "a_logger.rb").write_text(
+        "module A\n  class Logger; end\nend\n"
+    )
+    (tmp_path / "app" / "b_logger.rb").write_text(
+        "module B\n  class Logger; end\nend\n"
+    )
+    (tmp_path / "app" / "svc.rb").write_text(
+        "class Svc\n  include App::Import['core.logger']\nend\n"
+    )
+
+    s = GraphStore(str(tmp_path / ".code-review-graph" / "graph.db"))
+    full_build(tmp_path, s)
+
+    conn = sqlite3.connect(str(tmp_path / ".code-review-graph" / "graph.db"))
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT target_qualified FROM edges WHERE kind='DEPENDS_ON'"
+    ).fetchall()
+
+    assert len(rows) == 0, (
+        f"Ambiguous bare Logger must NOT create any DEPENDS_ON edge; "
+        f"got: {[r['target_qualified'] for r in rows]}"
+    )
+
+
+def test_di_unmapped_key_no_edge(tmp_path):
+    """Unmapped key: include App::Import['nope.missing'] with no matching register -> NO DEPENDS_ON."""
+    import sqlite3
+
+    from code_review_graph.graph import GraphStore
+    from code_review_graph.incremental import full_build
+
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "app").mkdir()
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".code-review-graph").mkdir()
+
+    (tmp_path / "lib" / "container.rb").write_text(
+        "class Container\n"
+        "  include Dry::Container::Mixin\n"
+        "  register('core.logger') { SomeLogger }\n"
+        "end\n"
+    )
+    (tmp_path / "app" / "some_logger.rb").write_text(
+        "class SomeLogger; end\n"
+    )
+    (tmp_path / "app" / "svc.rb").write_text(
+        "class Svc\n  include App::Import['nope.missing']\nend\n"
+    )
+
+    s = GraphStore(str(tmp_path / ".code-review-graph" / "graph.db"))
+    full_build(tmp_path, s)
+
+    conn = sqlite3.connect(str(tmp_path / ".code-review-graph" / "graph.db"))
+    rows = conn.execute(
+        "SELECT target_qualified FROM edges WHERE kind='DEPENDS_ON'"
+    ).fetchall()
+
+    assert len(rows) == 0, (
+        f"Unmapped DI key must not create DEPENDS_ON edge; got: {[r[0] for r in rows]}"
+    )
+
+
+def test_di_idempotency_no_duplicate_edges(tmp_path):
+    """Idempotency: running full_build twice must not create duplicate DEPENDS_ON edges."""
+    import sqlite3
+
+    from code_review_graph.graph import GraphStore
+    from code_review_graph.incremental import full_build
+
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "app").mkdir()
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".code-review-graph").mkdir()
+
+    (tmp_path / "lib" / "container.rb").write_text(
+        "class Container\n"
+        "  include Dry::Container::Mixin\n"
+        "  register('core.logger') { Logging::Logger.new }\n"
+        "end\n"
+    )
+    (tmp_path / "app" / "logging_logger.rb").write_text(
+        "module Logging\n  class Logger; end\nend\n"
+    )
+    (tmp_path / "app" / "svc.rb").write_text(
+        "class Svc\n  include App::Import['core.logger']\nend\n"
+    )
+
+    s = GraphStore(str(tmp_path / ".code-review-graph" / "graph.db"))
+    full_build(tmp_path, s)
+    full_build(tmp_path, s)
+
+    conn = sqlite3.connect(str(tmp_path / ".code-review-graph" / "graph.db"))
+    rows = conn.execute(
+        "SELECT target_qualified FROM edges WHERE kind='DEPENDS_ON'"
+    ).fetchall()
+
+    logger_edges = [r[0] for r in rows if "Logger" in r[0]]
+    assert len(logger_edges) == 1, (
+        f"Expected exactly 1 DEPENDS_ON edge to Logger after two builds; "
+        f"got {len(logger_edges)}: {logger_edges}"
+    )
