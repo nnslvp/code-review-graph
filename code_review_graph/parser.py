@@ -483,6 +483,20 @@ _RAILS_BASE_CLASSES: dict[str, str] = {
     "ApplicationMailer": "mailer", "ActionMailer::Base": "mailer",
 }
 
+# Ruby service/interactor/consumer/worker role detection via explicit superclass names.
+# Values are (ruby_role, entry_method) tuples.
+_RUBY_ROLE_BASE_CLASSES: dict[str, tuple[str, str]] = {
+    "ApplicationService": ("service", "call"),
+    "ApplicationConsumer": ("consumer", "consume"),
+    "Karafka::BaseConsumer": ("consumer", "consume"),
+}
+
+# Sidekiq mixin constants that signal a worker role.
+_SIDEKIQ_WORKER_MIXINS: frozenset[str] = frozenset({
+    "Sidekiq::Job",
+    "Sidekiq::Worker",
+})
+
 # Spring stereotype annotations that mark classes as managed beans
 _SPRING_STEREOTYPE_ANNOTATIONS = frozenset({
     "Component", "Service", "Repository", "Controller", "RestController",
@@ -3714,6 +3728,17 @@ class CodeParser:
             elif mname in self._RAILS_CALLBACK_MACROS and first_sym:
                 extra.setdefault("rails_callbacks", []).append(f"{mname}:{first_sym}")
 
+        # After processing all body members, check if any Sidekiq mixin was included.
+        # This sets ruby_role=worker / entry_method=perform on the class extra dict
+        # (same reference used by the NodeInfo already appended to nodes).
+        if "ruby_role" not in extra:
+            mixins: list[str] = extra.get("mixins") or []
+            for mixin in mixins:
+                if mixin in _SIDEKIQ_WORKER_MIXINS:
+                    extra["ruby_role"] = "worker"
+                    extra["entry_method"] = "perform"
+                    break
+
     def _extract_ruby_constructs(
         self,
         child,
@@ -4783,6 +4808,36 @@ class CodeParser:
             if role:
                 extra["rails_role"] = role
 
+        # Ruby: detect ruby_role (service/interactor/consumer/worker) from
+        # superclass name pattern or file-path convention. These determine which
+        # single method is the designated flow entry point.
+        if language == "ruby":
+            ruby_role: Optional[str] = None
+            ruby_entry: Optional[str] = None
+            for base in bases:
+                if base in _RUBY_ROLE_BASE_CLASSES:
+                    ruby_role, ruby_entry = _RUBY_ROLE_BASE_CLASSES[base]
+                    break
+                # Pattern match: *Service, *Interactor superclasses
+                if base.endswith("Service") or base.endswith("ApplicationService"):
+                    ruby_role, ruby_entry = "service", "call"
+                    break
+                if base.endswith("Interactor"):
+                    ruby_role, ruby_entry = "interactor", "call"
+                    break
+            if ruby_role is None:
+                if "/app/services/" in file_path or file_path.startswith("app/services/"):
+                    ruby_role, ruby_entry = "service", "call"
+                elif "/app/interactors/" in file_path or file_path.startswith("app/interactors/"):
+                    ruby_role, ruby_entry = "interactor", "call"
+                elif "/app/consumers/" in file_path or file_path.startswith("app/consumers/"):
+                    ruby_role, ruby_entry = "consumer", "consume"
+                elif "/app/producers/" in file_path or file_path.startswith("app/producers/"):
+                    ruby_role, ruby_entry = "consumer", "consume"
+            if ruby_role and ruby_entry:
+                extra["ruby_role"] = ruby_role
+                extra["entry_method"] = ruby_entry
+
         node = NodeInfo(
             kind="Class",
             name=name,
@@ -4934,6 +4989,10 @@ class CodeParser:
             qualified = self._qualify(f"self.{name}", file_path, parent_name)
         else:
             qualified = self._qualify(name, file_path, parent_name)
+            # Regular Ruby def inside a class: set ruby_owner_qn so the flows
+            # bridge can look up ruby_role by the namespace-correct class qn.
+            if language == "ruby" and parent_name:
+                method_extra["ruby_owner_qn"] = self._qualify(parent_name, file_path, None)
         params = self._get_params(child, language, source)
         ret_type = self._get_return_type(child, language, source)
 

@@ -152,22 +152,36 @@ _RAILS_JOB_METHODS: frozenset[str] = frozenset({"perform"})
 
 
 def _build_ruby_class_index(store: GraphStore) -> dict[str, dict]:
-    """Build an index of Ruby Rails class names to their role and nonpublic methods.
+    """Build an index of Ruby class qualified names to their role metadata.
 
-    Returns a dict keyed by class simple name with values:
-        {"role": str, "nonpublic": set[str]}
-    Only Ruby classes with a ``rails_role`` extra field are included.
+    Returns a dict with two sub-indexes:
+      - ``by_name``: keyed by class simple name (for rails_role classes)
+        values: {"role": str, "nonpublic": set[str]}
+      - ``by_qn``: keyed by class qualified name (for ruby_role classes)
+        values: {"ruby_role": str, "entry_method": str}
+
+    Only Ruby classes with a ``rails_role`` or ``ruby_role`` extra field
+    are included in their respective sub-indexes.
     """
-    idx: dict[str, dict] = {}
+    by_name: dict[str, dict] = {}
+    by_qn: dict[str, dict] = {}
     for n in store.get_nodes_by_kind(["Class"]):
         if n.language != "ruby":
             continue
-        role = (n.extra or {}).get("rails_role")
-        if not role:
-            continue
-        nonpublic = set((n.extra or {}).get("ruby_nonpublic_methods") or [])
-        idx[n.name] = {"role": role, "nonpublic": nonpublic}
-    return idx
+        extra = n.extra or {}
+
+        rails_role = extra.get("rails_role")
+        if rails_role:
+            nonpublic = set(extra.get("ruby_nonpublic_methods") or [])
+            by_name[n.name] = {"role": rails_role, "nonpublic": nonpublic}
+
+        ruby_role = extra.get("ruby_role")
+        if ruby_role:
+            entry_method = extra.get("entry_method", "")
+            class_qn = n.qualified_name
+            by_qn[class_qn] = {"ruby_role": ruby_role, "entry_method": entry_method}
+
+    return {"by_name": by_name, "by_qn": by_qn}
 
 
 def _is_rails_entry(node: GraphNode, class_index: dict[str, dict]) -> bool:
@@ -182,7 +196,8 @@ def _is_rails_entry(node: GraphNode, class_index: dict[str, dict]) -> bool:
     """
     if node.language != "ruby" or not node.parent_name:
         return False
-    cls = class_index.get(node.parent_name)
+    by_name = class_index.get("by_name", {})
+    cls = by_name.get(node.parent_name)
     if cls is None:
         return False
     if node.name in cls["nonpublic"]:
@@ -193,6 +208,40 @@ def _is_rails_entry(node: GraphNode, class_index: dict[str, dict]) -> bool:
     if role in ("controller", "mailer"):
         return True
     return False
+
+
+def _is_ruby_role_entry(node: GraphNode, class_index: dict[str, dict]) -> bool:
+    """Return True if *node* is the designated entry point of a ruby_role class.
+
+    A node qualifies when:
+    - It is a Ruby Function node.
+    - Its ``extra["ruby_owner_qn"]`` resolves to a class with ``ruby_role``.
+    - The method name matches the class's ``entry_method``.
+    """
+    if node.language != "ruby":
+        return False
+    owner_qn = (node.extra or {}).get("ruby_owner_qn")
+    if not owner_qn:
+        return False
+    by_qn = class_index.get("by_qn", {})
+    role_info = by_qn.get(owner_qn)
+    if role_info is None:
+        return False
+    return node.name == role_info["entry_method"]
+
+
+def _is_ruby_role_member(node: GraphNode, class_index: dict[str, dict]) -> bool:
+    """Return True if *node* belongs to a ruby_role class (but is NOT the entry method).
+
+    Used to suppress non-entry methods from being detected as "true root" entry points.
+    """
+    if node.language != "ruby":
+        return False
+    owner_qn = (node.extra or {}).get("ruby_owner_qn")
+    if not owner_qn:
+        return False
+    by_qn = class_index.get("by_qn", {})
+    return owner_qn in by_qn
 
 
 def detect_entry_points(
@@ -229,8 +278,18 @@ def detect_entry_points(
             continue
 
         # Skip private/protected methods of Rails classes.
-        cls = ruby_class_index.get(node.parent_name) if node.parent_name else None
+        by_name = ruby_class_index.get("by_name", {})
+        cls = by_name.get(node.parent_name) if node.parent_name else None
         if cls and node.name in cls["nonpublic"]:
+            continue
+
+        # Methods on ruby_role classes are gated: only the designated entry_method
+        # may become an entry point. Skip all further checks for non-entry members.
+        if _is_ruby_role_member(node, ruby_class_index):
+            if _is_ruby_role_entry(node, ruby_class_index):
+                if node.qualified_name not in seen_qn:
+                    entry_points.append(node)
+                    seen_qn.add(node.qualified_name)
             continue
 
         is_entry = False

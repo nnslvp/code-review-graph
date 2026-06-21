@@ -746,3 +746,190 @@ class TestFlows:
             "WHERE f.id IS NULL"
         ).fetchall()
         assert len(orphans) == 0, f"found {len(orphans)} orphaned memberships"
+
+    # ---------------------------------------------------------------
+    # Ruby service/consumer/worker role entry points (Task 9)
+    # ---------------------------------------------------------------
+
+    def test_ruby_service_call_is_entry_point(self):
+        """Service class `call` method is an entry point (namespace-correct via ruby_owner_qn)."""
+        file_path = "app/services/casinos/update_settings.rb"
+        class_qn = f"{file_path}::Casinos.UpdateSettings"
+        self.store.upsert_node(NodeInfo(
+            kind="Class",
+            name="UpdateSettings",
+            file_path=file_path,
+            line_start=1,
+            line_end=30,
+            language="ruby",
+            parent_name="Casinos",
+            extra={"ruby_role": "service", "entry_method": "call"},
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Function",
+            name="call",
+            file_path=file_path,
+            line_start=5,
+            line_end=20,
+            language="ruby",
+            parent_name="UpdateSettings",
+            extra={"ruby_owner_qn": class_qn},
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Function",
+            name="handle",
+            file_path=file_path,
+            line_start=22,
+            line_end=28,
+            language="ruby",
+            parent_name="UpdateSettings",
+            extra={"ruby_owner_qn": class_qn},
+        ))
+        self.store.commit()
+
+        eps = detect_entry_points(self.store, include_tests=False)
+        ep_names = {e.name for e in eps}
+        assert "call" in ep_names
+
+    def test_ruby_service_private_helper_not_entry_point(self):
+        """A non-entry method on a service class is NOT an entry point."""
+        file_path = "app/services/casinos/update_settings.rb"
+        class_qn = f"{file_path}::Casinos.UpdateSettings"
+        self.store.upsert_node(NodeInfo(
+            kind="Class",
+            name="UpdateSettings",
+            file_path=file_path,
+            line_start=1,
+            line_end=30,
+            language="ruby",
+            parent_name="Casinos",
+            extra={"ruby_role": "service", "entry_method": "call"},
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Function",
+            name="call",
+            file_path=file_path,
+            line_start=5,
+            line_end=20,
+            language="ruby",
+            parent_name="UpdateSettings",
+            extra={"ruby_owner_qn": class_qn},
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Function",
+            name="handle",
+            file_path=file_path,
+            line_start=22,
+            line_end=28,
+            language="ruby",
+            parent_name="UpdateSettings",
+            extra={"ruby_owner_qn": class_qn},
+        ))
+        self.store.commit()
+
+        eps = detect_entry_points(self.store, include_tests=False)
+        ep_names = {e.name for e in eps}
+        assert "handle" not in ep_names
+
+    def test_ruby_consumer_consume_is_entry_point(self):
+        """Consumer class `consume` method is an entry point."""
+        file_path = "app/consumers/orders_consumer.rb"
+        class_qn = f"{file_path}::OrdersConsumer"
+        self.store.upsert_node(NodeInfo(
+            kind="Class",
+            name="OrdersConsumer",
+            file_path=file_path,
+            line_start=1,
+            line_end=20,
+            language="ruby",
+            extra={"ruby_role": "consumer", "entry_method": "consume"},
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Function",
+            name="consume",
+            file_path=file_path,
+            line_start=3,
+            line_end=15,
+            language="ruby",
+            parent_name="OrdersConsumer",
+            extra={"ruby_owner_qn": class_qn},
+        ))
+        self.store.commit()
+
+        eps = detect_entry_points(self.store, include_tests=False)
+        ep_names = {e.name for e in eps}
+        assert "consume" in ep_names
+
+    def test_ruby_non_role_call_not_entry_point(self):
+        """A `call` method on a class WITHOUT ruby_role is NOT an entry point via the role gate."""
+        file_path = "app/lib/some_util.rb"
+        class_qn = f"{file_path}::SomeUtil"
+        self.store.upsert_node(NodeInfo(
+            kind="Class",
+            name="SomeUtil",
+            file_path=file_path,
+            line_start=1,
+            line_end=20,
+            language="ruby",
+            extra={},
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Function",
+            name="call",
+            file_path=file_path,
+            line_start=3,
+            line_end=15,
+            language="ruby",
+            parent_name="SomeUtil",
+            extra={"ruby_owner_qn": class_qn},
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Function",
+            name="other_caller",
+            file_path="app/lib/other.rb",
+            line_start=1,
+            line_end=5,
+            language="ruby",
+        ))
+        self.store.commit()
+        self.store.upsert_edge(EdgeInfo(
+            kind="CALLS",
+            source="app/lib/other.rb::other_caller",
+            target=f"{file_path}::SomeUtil.call",
+            file_path="app/lib/other.rb",
+            line=2,
+        ))
+        self.store.commit()
+
+        eps = detect_entry_points(self.store, include_tests=False)
+        ep_names = {e.name for e in eps}
+        assert "call" not in ep_names
+
+    def test_ruby_worker_perform_is_entry_point(self):
+        """Worker class `perform` method is an entry point."""
+        file_path = "app/workers/report_worker.rb"
+        class_qn = f"{file_path}::ReportWorker"
+        self.store.upsert_node(NodeInfo(
+            kind="Class",
+            name="ReportWorker",
+            file_path=file_path,
+            line_start=1,
+            line_end=20,
+            language="ruby",
+            extra={"ruby_role": "worker", "entry_method": "perform"},
+        ))
+        self.store.upsert_node(NodeInfo(
+            kind="Function",
+            name="perform",
+            file_path=file_path,
+            line_start=3,
+            line_end=15,
+            language="ruby",
+            parent_name="ReportWorker",
+            extra={"ruby_owner_qn": class_qn},
+        ))
+        self.store.commit()
+
+        eps = detect_entry_points(self.store, include_tests=False)
+        ep_names = {e.name for e in eps}
+        assert "perform" in ep_names
