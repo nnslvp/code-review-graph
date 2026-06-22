@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [2.5.3] - 2026-06-22
+
+### Fixed
+- `callers_of` no longer reports false Ruby callers via its bare-name fallback.
+  After the non-self-receiver CALLS fix (2.5.1), member calls on unknown
+  receivers (`dep.call`) are stored with a bare target; the `callers_of`
+  fallback (`search_edges_by_target_name`) would still surface them as callers
+  of a same-named method. The fallback is now skipped for Ruby nodes (Ruby
+  CALLS targets are qualified by `resolve_ruby_cross_module`); other languages
+  keep it. Found by Codex cross-review of the 2.5.1/2.5.2 changes.
+- `_ruby_first_const_arg` now anchors describe-based TESTED_BY only on a
+  *leading* constant subject: it returns None as soon as the first positional
+  argument is a non-constant (string, identifier, helper call), so a form like
+  `describe foo_helper, SomeConstant` no longer mis-anchors coverage to the
+  trailing constant.
+
 ## [2.5.2] - 2026-06-22
 
 ### Changed

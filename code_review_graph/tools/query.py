@@ -245,7 +245,11 @@ def query_graph(
             # Fallback: CALLS edges store unqualified target names
             # (e.g. "generateTestCode") while qn is fully qualified
             # (e.g. "file.ts::generateTestCode"). Search by plain name too.
-            if node:
+            # Skipped for Ruby: Ruby CALLS targets are qualified by
+            # resolve_ruby_cross_module, and unresolved bare targets are member
+            # calls on unknown receivers (e.g. `dep.call`). A bare-name match
+            # here would falsely report those as callers of a same-named method.
+            if node and node.language != "ruby":
                 for e in store.search_edges_by_target_name(node.name):
                     if e.source_qualified not in seen_sources:
                         seen_sources.add(e.source_qualified)

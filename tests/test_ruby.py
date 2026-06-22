@@ -562,6 +562,55 @@ def test_describe_string_arg_no_describe_tested_by(tmp_path):
     assert tb == [], f"string-described spec must not emit describe TESTED_BY, got {[dict(r) for r in tb]}"
 
 
+def test_callers_of_ruby_skips_bare_name_false_callers(tmp_path):
+    """callers_of(Thing.call) must NOT report `dep.call` (a member call on a
+    different receiver that shares the method name) as a caller. After the CALLS
+    fix such calls are stored bare with extra.receiver; the query-layer
+    bare-name fallback is skipped for Ruby so it does not re-introduce the false
+    caller edge.
+    """
+    from code_review_graph.tools.query import query_graph
+
+    sqlite3, s, full_build = _describe_setup(tmp_path)
+    (tmp_path / "lib" / "thing.rb").write_text(
+        "class Thing\n  def call\n  end\nend\n"
+    )
+    (tmp_path / "lib" / "user.rb").write_text(
+        "class User\n  def run(dep)\n    dep.call\n  end\nend\n"
+    )
+    full_build(tmp_path, s)
+
+    res = query_graph(
+        pattern="callers_of",
+        target=f"{tmp_path}/lib/thing.rb::Thing.call",
+        repo_root=str(tmp_path),
+    )
+    qns = [r.get("qualified_name") or "" for r in res["results"]]
+    assert all("User.run" not in q for q in qns), (
+        f"dep.call must not be reported as a caller of Thing.call; got {qns}"
+    )
+
+
+def test_describe_first_const_arg_only_leading_constant(tmp_path):
+    """`_ruby_first_const_arg` anchors only on a LEADING constant subject. A
+    non-constant first positional arg (string / helper call / identifier) yields
+    no describe-based class edge, even if a later arg is a constant.
+    """
+    from code_review_graph.parser import CodeParser
+
+    spec = tmp_path / "x_spec.rb"
+    spec.write_text("RSpec.describe foo_helper, SomeConstant do\n  it 'x' do end\nend\n")
+    _nodes, edges = CodeParser().parse_file(spec)
+    describe_tb = [
+        e for e in edges
+        if e.kind == "TESTED_BY" and (e.extra or {}).get("tested_via") == "describe"
+    ]
+    assert describe_tb == [], (
+        f"string-subject describe must not anchor to a trailing constant; got "
+        f"{[e.target for e in describe_tb]}"
+    )
+
+
 def test_di_namespaced_constant_resolves_to_correct_node(tmp_path):
     """Namespaced positive: container body 'Logging::Logger.new' resolves to the
     Logging::Logger class node, not any other Logger class, tier == INFERRED.

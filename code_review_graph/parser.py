@@ -3549,16 +3549,18 @@ class CodeParser:
         return None
 
     def _ruby_first_const_arg(self, args_node) -> Optional[str]:
-        """Return the first constant argument of a call, e.g. the ``Foo::Bar`` in
-        ``RSpec.describe Foo::Bar``. Returns the ``::``-joined constant text, or
-        None when the first significant argument is not a constant reference."""
+        """Return the constant subject of a call, e.g. the ``Foo::Bar`` in
+        ``RSpec.describe Foo::Bar``. Only a LEADING constant counts: the subject
+        is always the first positional argument, so return None as soon as the
+        first significant argument is anything other than a constant reference
+        (string description, helper call/identifier, symbol, ...)."""
         for arg in args_node.children:
+            if arg.type in (",", "comment"):
+                continue
             if arg.type in ("constant", "scope_resolution"):
                 return arg.text.decode("utf-8", errors="replace")
-            if arg.type in ("string", "symbol", "simple_symbol", "call"):
-                # A non-constant subject (string description, helper call) — the
-                # spec is not anchored to a class.
-                return None
+            # First significant argument is not a constant — not a class subject.
+            return None
         return None
 
     @staticmethod
