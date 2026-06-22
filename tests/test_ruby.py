@@ -491,7 +491,8 @@ def test_describe_based_tested_by_resolves_to_class(tmp_path):
     ).fetchall()
     assert len(tb) == 1, f"expected one describe-based TESTED_BY, got {[dict(r) for r in tb]}"
     assert tb[0]["target_qualified"] == calc_qn, (
-        f"describe-based TESTED_BY must resolve to the Calc class node, got {tb[0]['target_qualified']}"
+        "describe-based TESTED_BY must resolve to the Calc class node, got "
+        f"{tb[0]['target_qualified']}"
     )
 
     by_class = query_graph(pattern="tests_for", target=calc_qn, repo_root=str(tmp_path))
@@ -530,7 +531,8 @@ def test_rspec_dsl_calls_not_emitted_as_tested_by(tmp_path):
         " AND instr(target_qualified, '::') = 0"
     ).fetchall()
     assert noise == [], (
-        f"no bare-target (DSL-noise) TESTED_BY edges expected, got {[r['target_qualified'] for r in noise]}"
+        "no bare-target (DSL-noise) TESTED_BY edges expected, got "
+        f"{[r['target_qualified'] for r in noise]}"
     )
     dsl_targets = {"let", "expect", "to", "eq", "before", "allow", "receive",
                    "build_stubbed", "call"}
@@ -559,7 +561,9 @@ def test_describe_string_arg_no_describe_tested_by(tmp_path):
         "SELECT * FROM edges WHERE kind='TESTED_BY'"
         " AND json_extract(extra,'$.tested_via')='describe'"
     ).fetchall()
-    assert tb == [], f"string-described spec must not emit describe TESTED_BY, got {[dict(r) for r in tb]}"
+    assert tb == [], (
+        f"string-described spec must not emit describe TESTED_BY, got {[dict(r) for r in tb]}"
+    )
 
 
 def test_callers_of_ruby_skips_bare_name_false_callers(tmp_path):
@@ -819,6 +823,145 @@ def test_di_idempotency_no_duplicate_edges(tmp_path):
     assert len(logger_edges) == 1, (
         f"Expected exactly 1 DEPENDS_ON edge to Logger after two builds; "
         f"got {len(logger_edges)}: {logger_edges}"
+    )
+
+
+def test_di_static_const_emits_edge_dynamic_bodies_dropped(tmp_path):
+    """Positive+negative in ONE graph (so the negatives are not tautological):
+    a container registers a resolvable static const body together with two
+    dynamic / non-constant bodies. The static body emits a DEPENDS_ON edge to the
+    const's node; the dynamic bodies (`Rails.logger` — a method call, not `.new`;
+    `resolve(:y)` — a receiver-less call) emit nothing, proving
+    `_const_from_block` drops non-constant bodies while emission demonstrably
+    works in the same graph.
+    """
+    import json
+    import sqlite3
+
+    from code_review_graph.graph import GraphStore
+    from code_review_graph.incremental import full_build
+
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "app").mkdir()
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".code-review-graph").mkdir()
+
+    (tmp_path / "lib" / "container.rb").write_text(
+        "class Container\n"
+        "  include Dry::Container::Mixin\n"
+        "  register('repo') { Foo::Repo.new }\n"
+        # Non-`.new` method on a RESOLVABLE but DIFFERENT const: if the
+        # `method == 'new'` gate in _const_from_block regressed, this would
+        # wrongly emit an edge to Bar::Other (distinct from the positive's
+        # Foo::Repo, so it survives edge dedup) — making the negative below
+        # mutation-sensitive, not tautological.
+        "  register('instance') { Bar::Other.instance }\n"
+        # Receiver-less call: exercises the no-receiver drop branch.
+        "  register('x') { resolve(:y) }\n"
+        "end\n"
+    )
+    (tmp_path / "app" / "repo.rb").write_text(
+        "module Foo\n  class Repo; end\nend\n"
+        "module Bar\n  class Other; end\nend\n"
+    )
+    (tmp_path / "app" / "svc.rb").write_text(
+        "class Svc\n  include App::Import['repo', 'instance', 'x']\nend\n"
+    )
+
+    s = GraphStore(str(tmp_path / ".code-review-graph" / "graph.db"))
+    full_build(tmp_path, s)
+
+    conn = sqlite3.connect(str(tmp_path / ".code-review-graph" / "graph.db"))
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT target_qualified, extra FROM edges WHERE kind='DEPENDS_ON'"
+    ).fetchall()
+    di_keys = [json.loads(r["extra"] or "{}").get("di_key") for r in rows]
+
+    # Positive: the static const body resolves and emits exactly one edge,
+    # targeting the real Foo::Repo class node.
+    repo_edges = [
+        r for r in rows if json.loads(r["extra"] or "{}").get("di_key") == "repo"
+    ]
+    assert len(repo_edges) == 1, (
+        f"static const body must emit exactly one DEPENDS_ON edge; got di_keys={di_keys}"
+    )
+    target = repo_edges[0]["target_qualified"]
+    node = conn.execute(
+        "SELECT name, kind FROM nodes WHERE qualified_name=?", (target,)
+    ).fetchone()
+    assert node is not None and node["name"] == "Repo", (
+        f"DEPENDS_ON('repo') must target the real Foo::Repo node; got {target!r}"
+    )
+
+    # Negative (meaningful: the positive above proves emission works in this
+    # exact graph) — dynamic / non-constant bodies are dropped.
+    assert "instance" not in di_keys, (
+        f"Bar::Other.instance (method call, not .new) must not emit an edge; got {di_keys}"
+    )
+    assert "x" not in di_keys, (
+        f"resolve(:y) (receiver-less call) must not emit an edge; got {di_keys}"
+    )
+    # Belt-and-suspenders: no edge points at the dynamic body's would-be target.
+    targets = [r["target_qualified"] for r in rows]
+    assert not any("Other" in t for t in targets), (
+        f"no DEPENDS_ON edge should target Bar::Other; got {targets}"
+    )
+
+
+def test_di_register_outside_container_mixin_file_not_parsed(tmp_path):
+    """`register('k') { Const.new }` in a file that does NOT contain
+    `Dry::Container::Mixin` is ignored by `_build_container_key_map`. Paired with
+    a real container in the same graph (positive control) so the negative is not
+    tautological: the proper container's key emits an edge, the non-container
+    file's identically-shaped register does not — even though its const and the
+    importer both exist.
+    """
+    import json
+    import sqlite3
+
+    from code_review_graph.graph import GraphStore
+    from code_review_graph.incremental import full_build
+
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "app").mkdir()
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".code-review-graph").mkdir()
+
+    (tmp_path / "lib" / "container.rb").write_text(
+        "class Container\n"
+        "  include Dry::Container::Mixin\n"
+        "  register('good') { Foo::Repo.new }\n"
+        "end\n"
+    )
+    (tmp_path / "lib" / "plain.rb").write_text(
+        "class Plain\n"
+        "  register('bad') { Bar::Thing.new }\n"
+        "end\n"
+    )
+    (tmp_path / "app" / "models.rb").write_text(
+        "module Foo\n  class Repo; end\nend\n"
+        "module Bar\n  class Thing; end\nend\n"
+    )
+    (tmp_path / "app" / "svc.rb").write_text(
+        "class Svc\n  include App::Import['good', 'bad']\nend\n"
+    )
+
+    s = GraphStore(str(tmp_path / ".code-review-graph" / "graph.db"))
+    full_build(tmp_path, s)
+
+    conn = sqlite3.connect(str(tmp_path / ".code-review-graph" / "graph.db"))
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT extra FROM edges WHERE kind='DEPENDS_ON'"
+    ).fetchall()
+    di_keys = [json.loads(r["extra"] or "{}").get("di_key") for r in rows]
+
+    assert "good" in di_keys, (
+        f"register in a Dry::Container::Mixin file must emit an edge; got {di_keys}"
+    )
+    assert "bad" not in di_keys, (
+        f"register outside a Dry::Container::Mixin file must be ignored; got {di_keys}"
     )
 
 
