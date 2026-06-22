@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [2.5.4] - 2026-06-22
+
+### Performance
+- Ruby resolver CALLS arm: the tier-1 (no-receiver) path no longer issues two
+  SQLite queries per edge. Two in-memory indexes (`qualified_name → file_path`
+  and `(file_path, name) → [qualified_name]`, mirroring the existing tier-2
+  `member_index` pattern) are built once, and tier-1 resolution becomes O(1)
+  dict lookups. Edge writes (resolved targets and unresolved marking) are
+  accumulated and flushed with two `executemany` statements instead of one
+  UPDATE per edge — the unresolved marking alone was one write per Ruby CALLS
+  edge. On a 14k-file repo this cut parse+resolve from a resolver-dominated
+  >50 min to ~5 min, with byte-for-byte identical resolution output
+  (resolution reads only `nodes` + the in-memory indexes, never the edges being
+  updated, so batching the writes changes no decision). Removed the now-unused
+  `_update_edge_extracted` helper.
+
 ## [2.5.3] - 2026-06-22
 
 ### Fixed

@@ -50,16 +50,6 @@ def _update_edge(cur, target_qualified: str, extra: dict, edge_id: int) -> None:
     )
 
 
-def _update_edge_extracted(cur, target_qualified: str, extra: dict, edge_id: int) -> None:
-    """Write a resolved target + EXTRACTED confidence back to an edge row."""
-    extra["ruby_resolved"] = True
-    cur.execute(
-        "UPDATE edges SET target_qualified=?, extra=?,"
-        " confidence=?, confidence_tier=? WHERE id=?",
-        (target_qualified, json.dumps(extra), 1.0, "EXTRACTED", edge_id),
-    )
-
-
 def _extract_block_body_first_node(block_node):
     """Return the first named child of a block/do_block body, or None."""
     for btype in ("block_body", "body_statement"):
@@ -470,6 +460,40 @@ def resolve_ruby_cross_module(store: "GraphStore") -> dict:
                     if mname not in bucket[tier]:
                         bucket[tier][mname] = mqn
 
+        # Tier-1 in-memory indexes (mirror the tier-2 member_index pattern):
+        # replace the former two-queries-per-edge lookups with O(1) dict gets.
+        # On a large repo the tier-1 arm previously ran ~2 SELECTs per no-receiver
+        # CALLS edge (hundreds of thousands of queries); these maps make it one
+        # scan each. Resolution reads only `nodes` (never the edges being
+        # updated), so precomputing them changes no resolution decision.
+        # src_to_file: caller qualified_name -> file_path
+        #   (was: SELECT file_path FROM nodes WHERE qualified_name=?)
+        src_to_file: dict[str, str] = {}
+        for nrow in conn.execute(
+            "SELECT qualified_name, file_path FROM nodes WHERE language='ruby'"
+        ).fetchall():
+            src_to_file[nrow["qualified_name"]] = nrow["file_path"]
+        # file_fn_index: (file_path, bare_name) -> [qualified_name] for ruby Functions
+        #   (was: SELECT qualified_name FROM nodes
+        #         WHERE file_path=? AND name=? AND kind='Function' AND language='ruby')
+        file_fn_index: dict[tuple[str, str], list[str]] = {}
+        for nrow in conn.execute(
+            "SELECT qualified_name, file_path, name FROM nodes"
+            " WHERE language='ruby' AND kind='Function'"
+        ).fetchall():
+            file_fn_index.setdefault(
+                (nrow["file_path"], nrow["name"]), []
+            ).append(nrow["qualified_name"])
+
+        # Accumulate edge writes and flush once via executemany. The unresolved
+        # marking alone is one UPDATE per ruby CALLS edge, so per-edge writes were
+        # the other half of the cost. Writes never feed back into resolution
+        # (resolution reads `nodes` + the in-memory indexes), so deferring them to
+        # a single bulk flush is semantically identical to per-edge UPDATEs.
+        # resolved tuple: (target_qualified, extra_json, confidence, tier, edge_id)
+        resolved_writes: list[tuple[str, str, float, str, int]] = []
+        unresolved_writes: list[tuple[str, int]] = []
+
         # Process bare CALLS edges (no '::' in target_qualified).
         # Join through nodes to restrict to ruby-language callers only, so we
         # don't accidentally stamp extra["unresolved"]=True on non-Ruby edges.
@@ -493,24 +517,19 @@ def resolve_ruby_cross_module(store: "GraphStore") -> dict:
 
             receiver = extra.get("receiver", "")
 
-            # Tier-1: no receiver — look for a same-file def with matching name
+            # Tier-1: no receiver — same-file def with matching name (O(1) lookups)
             if not receiver:
-                src_file_row = conn.execute(
-                    "SELECT file_path FROM nodes WHERE qualified_name=?", (src,)
-                ).fetchone()
-                if src_file_row is not None:
-                    src_file = src_file_row["file_path"]
-                    same_file_matches = conn.execute(
-                        "SELECT qualified_name FROM nodes"
-                        " WHERE file_path=? AND name=? AND kind='Function' AND language='ruby'",
-                        (src_file, tgt),
-                    ).fetchall()
+                src_file = src_to_file.get(src)
+                if src_file is not None:
+                    same_file_matches = file_fn_index.get((src_file, tgt), [])
                     if len(same_file_matches) == 1:
-                        matched_qn = same_file_matches[0]["qualified_name"]
-                        _update_edge_extracted(cur, matched_qn, extra, eid)
+                        extra["ruby_resolved"] = True
+                        resolved_writes.append(
+                            (same_file_matches[0], json.dumps(extra), 1.0, "EXTRACTED", eid)
+                        )
                         stats["calls_resolved"] += 1
                         continue
-                    # Multiple matches: ambiguous — fall through to unresolved
+                    # 0 or >1 matches: ambiguous — fall through to unresolved
 
             # Tier-2: constant receiver (starts with uppercase letter)
             if receiver and _is_constant(receiver):
@@ -552,17 +571,32 @@ def resolve_ruby_cross_module(store: "GraphStore") -> dict:
                         resolved_qn = members["singleton"].get(tgt)
 
                     if resolved_qn is not None:
-                        _update_edge(cur, resolved_qn, extra, eid)
+                        extra["ruby_resolved"] = True
+                        resolved_writes.append(
+                            (resolved_qn, json.dumps(extra), 0.7, "INFERRED", eid)
+                        )
                         stats["calls_resolved"] += 1
                         continue
 
             # No resolution possible — mark unresolved
             extra["unresolved"] = True
-            cur.execute(
-                "UPDATE edges SET extra=? WHERE id=?",
-                (json.dumps(extra), eid),
-            )
+            unresolved_writes.append((json.dumps(extra), eid))
             stats["calls_unresolved"] += 1
+
+        # Flush accumulated writes in two bulk statements (one round-trip each
+        # instead of one UPDATE per edge). Done before step 4 below, which reads
+        # the now-resolved CALLS edges back to propagate TESTED_BY targets.
+        if resolved_writes:
+            cur.executemany(
+                "UPDATE edges SET target_qualified=?, extra=?,"
+                " confidence=?, confidence_tier=? WHERE id=?",
+                resolved_writes,
+            )
+        if unresolved_writes:
+            cur.executemany(
+                "UPDATE edges SET extra=? WHERE id=?",
+                unresolved_writes,
+            )
 
     except Exception:
         logger.exception("ruby_resolver: CALLS arm failed")
