@@ -1054,7 +1054,14 @@ class CodeParser:
         # When a test function calls a production function, emit an edge
         # from the test (source) to the production function (target) so that
         # consumers can find tests via get_edges_by_target(prod).
-        if test_file:
+        #
+        # Ruby coverage is captured via describe-based TESTED_BY edges
+        # (`RSpec.describe SomeClass`, emitted in _extract_ruby_constructs), not
+        # per-call edges: RSpec example bodies are dominated by DSL/mock calls
+        # (let/expect/before/allow/receive), so a CALLS-derived edge per call
+        # produces ~99% noise. Skip the CALLS-derived path for Ruby only; other
+        # languages keep it.
+        if test_file and self.detect_language(Path(file_path_str)) != "ruby":
             test_qnames = set()
             for n in nodes:
                 if n.is_test:
@@ -3541,6 +3548,19 @@ class CodeParser:
                         return s.text.decode("utf-8", errors="replace")
         return None
 
+    def _ruby_first_const_arg(self, args_node) -> Optional[str]:
+        """Return the first constant argument of a call, e.g. the ``Foo::Bar`` in
+        ``RSpec.describe Foo::Bar``. Returns the ``::``-joined constant text, or
+        None when the first significant argument is not a constant reference."""
+        for arg in args_node.children:
+            if arg.type in ("constant", "scope_resolution"):
+                return arg.text.decode("utf-8", errors="replace")
+            if arg.type in ("string", "symbol", "simple_symbol", "call"):
+                # A non-constant subject (string description, helper call) — the
+                # spec is not anchored to a class.
+                return None
+        return None
+
     @staticmethod
     def _ruby_singularize(word: str) -> str:
         if word.endswith("ies"):
@@ -4036,7 +4056,9 @@ class CodeParser:
             and _is_test_file(file_path)
         ):
             desc = self._ruby_first_string_arg(args) if args is not None else None
-            label = f"{name} {desc}" if desc else name
+            const_arg = self._ruby_first_const_arg(args) if args is not None else None
+            label_desc = desc or const_arg
+            label = f"{name} {label_desc}" if label_desc else name
             test_qn_name = label
             nodes.append(NodeInfo(
                 kind="Test", name=test_qn_name, file_path=file_path,
@@ -4045,6 +4067,22 @@ class CodeParser:
                 language=language, parent_name=enclosing_class, is_test=True,
                 extra={"ruby_kind": "rspec"},
             ))
+            # describe-based coverage: `RSpec.describe SomeClass` declares that
+            # this spec tests SomeClass. Emit a TESTED_BY edge (test -> prod)
+            # to the (bare) constant; resolve_ruby_cross_module resolves it to
+            # the prod class node post-build. This is the canonical Ruby
+            # coverage signal — CALLS-derived TESTED_BY is suppressed for Ruby
+            # (see the TESTED_BY emission block) because RSpec example bodies are
+            # dominated by DSL noise (let/expect/before/mocks).
+            if const_arg:
+                edges.append(EdgeInfo(
+                    kind="TESTED_BY",
+                    source=self._qualify(test_qn_name, file_path, enclosing_class),
+                    target=const_arg,
+                    file_path=file_path,
+                    line=child.start_point[0] + 1,
+                    extra={"tested_via": "describe", "confidence_tier": "INFERRED"},
+                ))
             self._extract_from_tree(
                 block, source, language, file_path, nodes, edges,
                 enclosing_class, test_qn_name, import_map, defined_names, _depth + 1,

@@ -322,6 +322,23 @@ def query_graph(
                         results.append(d)
                         edges_out.append(edge_to_dict(e))
                         seen_test_qns.add(test.qualified_name)
+            # Method -> class rollup: a method is also covered by tests that
+            # target its containing class (e.g. Ruby's describe-based,
+            # class-level TESTED_BY edges). Surface those for method queries.
+            if node and node.kind == "Function":
+                for ce in store.get_edges_by_target(qn):
+                    if ce.kind != "CONTAINS":
+                        continue
+                    for e in store.get_edges_by_target(ce.source_qualified):
+                        if e.kind != "TESTED_BY":
+                            continue
+                        test = store.get_node(e.source_qualified)
+                        if test and test.qualified_name not in seen_test_qns:
+                            d = node_to_dict(test)
+                            d["confidence_tier"] = e.confidence_tier
+                            results.append(d)
+                            edges_out.append(edge_to_dict(e))
+                            seen_test_qns.add(test.qualified_name)
             # Bare-name fallback: TESTED_BY edges with unresolved bare targets
             # (e.g. Ruby method calls through non-constant receivers).
             bare_name = qn.rsplit("::", 1)[-1].rsplit(".", 1)[-1] if "::" in qn else qn

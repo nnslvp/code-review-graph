@@ -447,6 +447,121 @@ def test_rspec_test_nodes_created_in_spec_files(tmp_path):
     )
 
 
+def _describe_setup(tmp_path):
+    import sqlite3
+
+    from code_review_graph.graph import GraphStore
+    from code_review_graph.incremental import full_build
+
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "spec").mkdir()
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".code-review-graph").mkdir()
+    s = GraphStore(str(tmp_path / ".code-review-graph" / "graph.db"))
+    return sqlite3, s, full_build
+
+
+def test_describe_based_tested_by_resolves_to_class(tmp_path):
+    """`RSpec.describe Calc` emits a describe-based TESTED_BY edge from the spec
+    to the Calc class, resolved post-build to the prod class node. Both
+    tests_for(Calc) and tests_for(Calc.add) (via method->class rollup) find it.
+    """
+    from code_review_graph.tools.query import query_graph
+
+    sqlite3, s, full_build = _describe_setup(tmp_path)
+    (tmp_path / "lib" / "calc.rb").write_text(
+        "class Calc\n  def add(a, b)\n    a + b\n  end\nend\n"
+    )
+    # Use a non-constant call inside the example so the only TESTED_BY signal is
+    # the describe-based one (not an incidental resolved member call).
+    (tmp_path / "spec" / "calc_spec.rb").write_text(
+        "RSpec.describe Calc do\n"
+        "  it 'adds' do\n"
+        "    subject.add(1, 2)\n"
+        "  end\nend\n"
+    )
+    full_build(tmp_path, s)
+
+    calc_qn = f"{tmp_path}/lib/calc.rb::Calc"
+    conn = sqlite3.connect(str(tmp_path / ".code-review-graph" / "graph.db"))
+    conn.row_factory = sqlite3.Row
+    tb = conn.execute(
+        "SELECT source_qualified, target_qualified, extra FROM edges"
+        " WHERE kind='TESTED_BY' AND json_extract(extra,'$.tested_via')='describe'"
+    ).fetchall()
+    assert len(tb) == 1, f"expected one describe-based TESTED_BY, got {[dict(r) for r in tb]}"
+    assert tb[0]["target_qualified"] == calc_qn, (
+        f"describe-based TESTED_BY must resolve to the Calc class node, got {tb[0]['target_qualified']}"
+    )
+
+    by_class = query_graph(pattern="tests_for", target=calc_qn, repo_root=str(tmp_path))
+    assert len(by_class["results"]) >= 1, f"tests_for(Calc) found nothing: {by_class['results']}"
+
+    by_method = query_graph(
+        pattern="tests_for", target=f"{calc_qn}.add", repo_root=str(tmp_path)
+    )
+    assert len(by_method["results"]) >= 1, (
+        f"tests_for(Calc.add) must find the spec via method->class rollup; "
+        f"got: {by_method['results']}"
+    )
+
+
+def test_rspec_dsl_calls_not_emitted_as_tested_by(tmp_path):
+    """RSpec DSL / mock calls (let, expect, before, eq) and member calls on
+    locals must NOT produce TESTED_BY edges. After the build the only TESTED_BY
+    edges in a spec file are describe-based (and resolve to a real node).
+    """
+    sqlite3, s, full_build = _describe_setup(tmp_path)
+    (tmp_path / "lib" / "calc.rb").write_text("class Calc\n  def add; end\nend\n")
+    (tmp_path / "spec" / "calc_spec.rb").write_text(
+        "RSpec.describe Calc do\n"
+        "  let(:thing) { build_stubbed(:thing) }\n"
+        "  before { allow(thing).to receive(:run) }\n"
+        "  it 'adds' do\n"
+        "    expect(thing.call).to eq(1)\n"
+        "  end\nend\n"
+    )
+    full_build(tmp_path, s)
+
+    conn = sqlite3.connect(str(tmp_path / ".code-review-graph" / "graph.db"))
+    conn.row_factory = sqlite3.Row
+    noise = conn.execute(
+        "SELECT target_qualified FROM edges WHERE kind='TESTED_BY'"
+        " AND instr(target_qualified, '::') = 0"
+    ).fetchall()
+    assert noise == [], (
+        f"no bare-target (DSL-noise) TESTED_BY edges expected, got {[r['target_qualified'] for r in noise]}"
+    )
+    dsl_targets = {"let", "expect", "to", "eq", "before", "allow", "receive",
+                   "build_stubbed", "call"}
+    all_tb = conn.execute(
+        "SELECT target_qualified FROM edges WHERE kind='TESTED_BY'"
+    ).fetchall()
+    for r in all_tb:
+        bare = r["target_qualified"].rsplit("::", 1)[-1].rsplit(".", 1)[-1]
+        assert bare not in dsl_targets, f"DSL call leaked into TESTED_BY: {r['target_qualified']}"
+
+
+def test_describe_string_arg_no_describe_tested_by(tmp_path):
+    """`describe 'a string'` (no constant subject) emits no describe-based
+    TESTED_BY edge — there is no class to anchor coverage to.
+    """
+    sqlite3, s, full_build = _describe_setup(tmp_path)
+    (tmp_path / "lib" / "calc.rb").write_text("class Calc\n  def add; end\nend\n")
+    (tmp_path / "spec" / "calc_spec.rb").write_text(
+        "RSpec.describe 'some behaviour' do\n  it 'works' do\n    Calc\n  end\nend\n"
+    )
+    full_build(tmp_path, s)
+
+    conn = sqlite3.connect(str(tmp_path / ".code-review-graph" / "graph.db"))
+    conn.row_factory = sqlite3.Row
+    tb = conn.execute(
+        "SELECT * FROM edges WHERE kind='TESTED_BY'"
+        " AND json_extract(extra,'$.tested_via')='describe'"
+    ).fetchall()
+    assert tb == [], f"string-described spec must not emit describe TESTED_BY, got {[dict(r) for r in tb]}"
+
+
 def test_di_namespaced_constant_resolves_to_correct_node(tmp_path):
     """Namespaced positive: container body 'Logging::Logger.new' resolves to the
     Logging::Logger class node, not any other Logger class, tier == INFERRED.

@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [2.5.2] - 2026-06-22
+
+### Changed
+- Ruby TESTED_BY is now **describe-based**: `RSpec.describe SomeClass` /
+  `describe SomeClass` emits a single high-precision TESTED_BY edge from the
+  spec to the described class (resolved post-build to the prod class node).
+  The previous CALLS-derived emission (one edge per call inside a spec) is
+  suppressed for Ruby because RSpec example bodies are dominated by DSL/mock
+  calls (`let`, `expect`, `before`, `allow`, `receive`), which made ~99.9% of
+  Ruby TESTED_BY edges noise pointing at framework methods rather than code
+  under test. Real-repo impact: a real Rails app 8427→70 edges, a second Rails app
+  39262→205 — every remaining edge resolves to a real production class.
+  Other languages are unaffected (the suppression is gated to Ruby).
+- `tests_for` (both `query_graph` and `get_transitive_tests`) now performs a
+  method→class rollup: querying tests for `Foo.bar` also returns specs that
+  describe the containing class `Foo`, so describe-based class-level coverage
+  is surfaced for method-level queries.
+
 ## [2.5.1] - 2026-06-22
 
 ### Fixed

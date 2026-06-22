@@ -619,6 +619,40 @@ def resolve_ruby_cross_module(store: "GraphStore") -> dict:
     except Exception:
         logger.exception("ruby_resolver: TESTED_BY propagation failed")
 
+    # 4b) Resolve describe-based TESTED_BY edges (spec -> described constant).
+    #     `RSpec.describe SomeClass` emits a TESTED_BY edge to the bare constant
+    #     (extra.tested_via == "describe"); resolve it to the prod class node
+    #     via the const index. Drop edges whose constant is not a repo class
+    #     (e.g. a described gem class) so no dangling TESTED_BY remains.
+    try:
+        full_path_to_qn, bare_name_to_qns = _build_di_const_indexes(conn)
+        describe_resolved = 0
+        describe_dropped = 0
+        for row in cur.execute(
+            "SELECT id, target_qualified, extra FROM edges"
+            " WHERE kind='TESTED_BY'"
+        ).fetchall():
+            extra = json.loads(row["extra"] or "{}")
+            if extra.get("tested_via") != "describe" or extra.get("ruby_resolved"):
+                continue
+            resolved = _resolve_const_to_node(
+                row["target_qualified"], full_path_to_qn, bare_name_to_qns
+            )
+            if resolved:
+                extra["ruby_resolved"] = True
+                cur.execute(
+                    "UPDATE edges SET target_qualified=?, extra=? WHERE id=?",
+                    (resolved, json.dumps(extra), row["id"]),
+                )
+                describe_resolved += 1
+            else:
+                cur.execute("DELETE FROM edges WHERE id=?", (row["id"],))
+                describe_dropped += 1
+        stats["tested_by_describe_resolved"] = describe_resolved
+        stats["tested_by_describe_dropped"] = describe_dropped
+    except Exception:
+        logger.exception("ruby_resolver: describe TESTED_BY resolution failed")
+
     # 5) Propagate concern ASSOCIATES edges to includers.
     #    For each class that INCLUDES a concern node, copy the concern's
     #    ASSOCIATES edges onto the includer with extra["inherited_via"] set

@@ -407,6 +407,16 @@ class GraphStore:
                 (qualified_name,),
             ).fetchall():
                 input_qns.append(mrow["target_qualified"])
+        elif row and row["kind"] == "Function":
+            # Method -> class rollup: a method is covered by tests targeting its
+            # containing class (e.g. Ruby's describe-based, class-level
+            # TESTED_BY edges). Include the containing class as an input.
+            for crow in conn.execute(
+                "SELECT source_qualified FROM edges "
+                "WHERE target_qualified = ? AND kind = 'CONTAINS'",
+                (qualified_name,),
+            ).fetchall():
+                input_qns.append(crow["source_qualified"])
 
         def _node_dict(qn: str, indirect: bool) -> dict | None:
             row = conn.execute(
