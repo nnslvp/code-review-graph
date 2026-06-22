@@ -765,11 +765,13 @@ class TestInstallPlatformConfigs:
     def test_install_opencode_config(self, tmp_path):
         configured = install_platform_configs(tmp_path, target="opencode")
         assert "OpenCode" in configured
-        config_path = tmp_path / ".opencode.json"
+        config_path = tmp_path / "opencode.json"
         data = json.loads(config_path.read_text())
-        entry = data["mcpServers"]["code-review-graph"]
-        assert entry["type"] == "stdio"
-        assert entry["env"] == []
+        entry = data["mcp"]["code-review-graph"]
+        assert entry["type"] == "local"
+        assert entry["enabled"] is True
+        assert isinstance(entry["command"], list)
+        assert entry["command"][-1] == "serve"
 
     def test_install_gemini_cli_config(self, tmp_path):
         gemini_config = tmp_path / ".gemini" / "settings.json"
@@ -860,7 +862,7 @@ class TestInstallPlatformConfigs:
         assert "OpenCode" in configured
         assert codex_config.exists()
         assert (tmp_path / ".mcp.json").exists()
-        assert (tmp_path / ".opencode.json").exists()
+        assert (tmp_path / "opencode.json").exists()
 
     def test_merge_existing_servers(self, tmp_path):
         """Should not overwrite existing MCP servers."""

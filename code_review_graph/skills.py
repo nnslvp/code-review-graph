@@ -84,8 +84,10 @@ PLATFORMS: dict[str, dict[str, Any]] = {
     },
     "opencode": {
         "name": "OpenCode",
-        "config_path": lambda root: root / ".opencode.json",
-        "key": "mcpServers",
+        # Latest opencode (opencode.ai): project config is `opencode.json` at the
+        # project root; MCP servers live under the `mcp` key.
+        "config_path": lambda root: root / "opencode.json",
+        "key": "mcp",
         "detect": lambda: True,
         "format": "object",
         "needs_type": True,
@@ -235,14 +237,17 @@ def _build_server_entry(
 ) -> dict[str, Any]:
     """Build the MCP server entry for a platform."""
     command, args = _detect_serve_command()
+    if key == "opencode":
+        # Latest opencode (opencode.ai) local-MCP schema:
+        #   { "type": "local", "command": [argv...], "enabled": true }
+        # command is a single argv array (command + args), not split.
+        return {"type": "local", "command": [command, *args], "enabled": True}
     entry: dict[str, Any] = {"command": command, "args": args}
     # Include cwd so the MCP server can find the graph database
     if repo_root is not None:
         entry["cwd"] = str(repo_root)
     if plat["needs_type"]:
         entry["type"] = "stdio"
-    if key == "opencode":
-        entry["env"] = []
     return entry
 
 

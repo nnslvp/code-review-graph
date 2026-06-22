@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+## [2.5.6] - 2026-06-22
+
+### Changed
+- `install --platform opencode` now targets the **latest opencode** (opencode.ai)
+  config format: it writes `opencode.json` at the project root with the server
+  under the `mcp` key as `{ "type": "local", "command": [argv…], "enabled": true }`,
+  replacing the previous `.opencode.json` / `mcpServers` shape.
+
 ## [2.5.5] - 2026-06-22
 
 ### Fixed
