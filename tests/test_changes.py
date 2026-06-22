@@ -711,3 +711,35 @@ class TestCoverageUnknown:
         assert "untested_fn" in gap_names
         assert "tested_fn" not in gap_names
         assert result.get("coverage_unknown") is not True
+
+
+def test_get_fresh_line_coverage_branches():
+    """`_get_fresh_line_coverage` returns the value only when coverage is fresh
+    and numeric; stale, missing, or unparseable coverage all yield None so a
+    stale number never suppresses a test gap."""
+    from code_review_graph.changes import _get_fresh_line_coverage
+    from code_review_graph.graph import GraphNode
+
+    def _node(extra):
+        return GraphNode(
+            id=1, kind="Function", name="f", qualified_name="x.rb::C.f",
+            file_path="x.rb", line_start=1, line_end=2, language="ruby",
+            parent_name="C", params=None, return_type=None, is_test=False,
+            file_hash=None, extra=extra,
+        )
+
+    def cov(extra):
+        return _get_fresh_line_coverage(_node(extra))
+
+    # fresh + numeric -> the value (float and int both coerce to float)
+    assert cov({"coverage_freshness": "fresh", "line_coverage": 0.75}) == 0.75
+    assert cov({"coverage_freshness": "fresh", "line_coverage": 1}) == 1.0
+    # stale / unknown freshness -> None (never let a stale number hide a gap)
+    assert cov({"coverage_freshness": "stale", "line_coverage": 0.9}) is None
+    assert cov({"line_coverage": 0.9}) is None
+    # fresh but missing value -> None
+    assert cov({"coverage_freshness": "fresh"}) is None
+    # fresh but unparseable value -> None
+    assert cov({"coverage_freshness": "fresh", "line_coverage": "abc"}) is None
+    # no extra at all -> None
+    assert cov({}) is None

@@ -192,6 +192,7 @@ def _build_di_const_indexes(
     """
     full_path_to_qn: dict[str, str] = {}
     bare_name_to_qns: dict[str, list[str]] = {}
+    _fp_to_qns: dict[str, list[str]] = {}
 
     for row in conn.execute(
         "SELECT qualified_name, name FROM nodes"
@@ -201,8 +202,17 @@ def _build_di_const_indexes(
         bare: str = row["name"]
         full_path = _qn_to_ruby_full_path(qn)
         if full_path:
-            full_path_to_qn[full_path] = qn
+            _fp_to_qns.setdefault(full_path, []).append(qn)
         bare_name_to_qns.setdefault(bare, []).append(qn)
+
+    # Keep an exact full-path mapping only when it is UNIQUE. A full namespace
+    # path shared by >1 node means a module/class reopened across files (very
+    # common in Ruby, e.g. `module Foo` reopened in many files); resolving it to
+    # any single node would be arbitrary (last-writer-wins). Leave it out so
+    # _resolve_const_to_node returns None rather than an arbitrary/wrong node.
+    for full_path, qns in _fp_to_qns.items():
+        if len(set(qns)) == 1:
+            full_path_to_qn[full_path] = qns[0]
 
     return full_path_to_qn, bare_name_to_qns
 

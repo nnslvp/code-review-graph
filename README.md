@@ -68,6 +68,15 @@ The graph understands Rails and common Ruby idioms, not just bare method definit
   dependencies are left **unresolved rather than mis-attributed**. Every inferred edge carries a confidence tier
   (`EXTRACTED` / `INFERRED` / `AMBIGUOUS`).
 
+**Known limitations** (deliberate under-claim — missing beats false):
+- A bare, zero-argument, no-receiver call (e.g. `save`, `authenticate`) is left
+  unresolved rather than guessed: telling a local method call apart from a local
+  variable reference would need full local-binding analysis. Explicit calls,
+  including `Const.method` (`User.find`, `Order.where`), are captured.
+- `describe SomeModule` where the module is reopened across several files is not
+  anchored to any single definition (the namespace path is ambiguous), so it
+  produces no `TESTED_BY` edge. Describing a concrete class resolves normally.
+
 Other languages and the MCP/CLI contract are unchanged, and there is no database migration — the Ruby work is
 additive and gated, so existing graphs keep working exactly as before.
 

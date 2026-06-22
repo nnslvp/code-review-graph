@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+## [2.5.5] - 2026-06-22
+
+### Fixed
+- Ruby constant resolution (`_resolve_const_to_node` / `_build_di_const_indexes`):
+  a constant whose full namespace path is shared by more than one node — a
+  module or class reopened across files (very common in Ruby) — no longer
+  resolves to an arbitrary file (previously last-writer-wins in the const
+  index). It is now treated as ambiguous and left unresolved, so
+  `describe SomeReopenedModule` produces no `TESTED_BY` edge rather than a
+  misleading one anchored to whichever file happened to be indexed last.
+  Uniquely-defined constants (the common case, and all DI registrations to a
+  single class) are unaffected.
+
+### Added
+- Unit coverage for `_get_fresh_line_coverage` (changes.py) across the fresh /
+  stale / missing / unparseable branches.
+
+### Docs
+- README: documented Ruby known limitations (bare zero-argument no-receiver
+  calls are left unresolved; `describe` of a reopened module is not anchored).
+
 ## [2.5.4] - 2026-06-22
 
 ### Performance

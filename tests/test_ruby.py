@@ -615,6 +615,38 @@ def test_describe_first_const_arg_only_leading_constant(tmp_path):
     )
 
 
+def test_describe_reopened_module_dropped_unique_class_resolves(tmp_path):
+    """`describe SomeModule` where the module is reopened across files must NOT
+    resolve to an arbitrary file (ambiguous full-path → dropped). A uniquely
+    defined class in the same graph still resolves.
+    """
+    sqlite3, s, full_build = _describe_setup(tmp_path)
+    # `module Shared` reopened across two files -> full-path "Shared" is ambiguous
+    (tmp_path / "lib" / "shared_a.rb").write_text("module Shared\n  class A; end\nend\n")
+    (tmp_path / "lib" / "shared_b.rb").write_text("module Shared\n  class B; end\nend\n")
+    # a uniquely-defined class
+    (tmp_path / "lib" / "uniq.rb").write_text("class Uniq\n  def go; end\nend\n")
+    (tmp_path / "spec" / "shared_spec.rb").write_text(
+        "RSpec.describe Shared do\n  it 'x' do end\nend\n"
+    )
+    (tmp_path / "spec" / "uniq_spec.rb").write_text(
+        "RSpec.describe Uniq do\n  it 'y' do end\nend\n"
+    )
+    full_build(tmp_path, s)
+
+    conn = sqlite3.connect(str(tmp_path / ".code-review-graph" / "graph.db"))
+    conn.row_factory = sqlite3.Row
+    targets = [
+        r["target_qualified"] for r in conn.execute(
+            "SELECT target_qualified FROM edges WHERE kind='TESTED_BY'"
+            " AND json_extract(extra,'$.tested_via')='describe'"
+        ).fetchall()
+    ]
+    # Only the unique class resolves; the reopened module is dropped (no arbitrary edge).
+    assert len(targets) == 1, f"expected only the unique describe to resolve, got {targets}"
+    assert targets[0].endswith("::Uniq"), f"unique class Uniq must resolve, got {targets[0]}"
+
+
 def test_di_namespaced_constant_resolves_to_correct_node(tmp_path):
     """Namespaced positive: container body 'Logging::Logger.new' resolves to the
     Logging::Logger class node, not any other Logger class, tier == INFERRED.
