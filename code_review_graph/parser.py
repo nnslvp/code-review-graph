@@ -3651,6 +3651,30 @@ class CodeParser:
                     current_vis = t
                 continue
             if member.type in ("method", "singleton_method"):
+                # Constructor injection: def initialize(foo:) — collect required
+                # keyword params as DI dependency hints. Resolved post-build into
+                # DEPENDS_ON edges by the Ruby resolver (mirrors di_keys).
+                if (
+                    member.type == "method"
+                    and self._get_name(member, "ruby", "function") == "initialize"
+                ):
+                    params = member.child_by_field_name("parameters")
+                    if params is not None:
+                        for prm in params.children:
+                            # Only REQUIRED keyword params (`foo:`). A defaulted
+                            # kwarg (`foo: nil`) has a value child -> 2 named
+                            # children; skip it. Positional / splat / double-splat
+                            # params are not keyword_parameter and are skipped.
+                            if (
+                                prm.type == "keyword_parameter"
+                                and prm.named_child_count == 1
+                            ):
+                                ident = prm.named_children[0]
+                                if ident.type == "identifier":
+                                    pname = ident.text.decode(
+                                        "utf-8", errors="replace"
+                                    )
+                                    extra.setdefault("ctor_deps", []).append(pname)
                 if current_vis != "public":
                     mname_node = member.child_by_field_name("name")
                     if mname_node is not None:

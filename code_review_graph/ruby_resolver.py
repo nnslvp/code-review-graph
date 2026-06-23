@@ -40,6 +40,14 @@ def _camel_to_path(const_name: str) -> str:
     return "/".join(out)
 
 
+def _snake_to_camel(name: str) -> str:
+    """snake_case identifier -> CamelCase constant guess (logger -> Logger,
+    error_notifier -> ErrorNotifier). Used to map constructor-injection param
+    names to a candidate Ruby constant; resolution stays unique-bare-name only.
+    """
+    return "".join(part[:1].upper() + part[1:] for part in name.split("_") if part)
+
+
 def _update_edge(cur, target_qualified: str, extra: dict, edge_id: int) -> None:
     """Write a resolved target + INFERRED confidence back to an edge row."""
     extra["ruby_resolved"] = True
@@ -255,24 +263,51 @@ def _resolve_di_imports(
     full_path_to_qn: dict[str, str],
     bare_name_to_qns: dict[str, list[str]],
 ) -> int:
-    """Emit DEPENDS_ON edges for classes with extra['di_keys'] resolved via key_map.
+    """Emit DEPENDS_ON edges for classes that inject dependencies.
 
-    For each class node that has di_keys set (populated by the parser when it sees
-    include Ns::Import['k1','k2',...]), look up each key in key_map to get a
-    Ruby constant name, then resolve that constant to a qualified node name using
-    the full-path index (exact or suffix match) with bare-name fallback only when
-    the name is unique. Emit a DEPENDS_ON edge with INFERRED confidence tier. Keys
-    not found in key_map, or constants not resolvable unambiguously, are silently
-    omitted (never convention-guessed, never picked arbitrarily).
+    Two DI sources, both resolved to a target node and emitted uniformly as
+    DEPENDS_ON (distinguished by extra['di_kind']):
+
+    - dry-auto_inject (di_kind='import'): the parser sets extra['di_keys'] when it
+      sees include Ns::Import['k1',...]. Each key is mapped through key_map (built
+      from Dry::Container.register blocks) to a Ruby constant, then resolved.
+    - constructor injection (di_kind='ctor'): the parser sets extra['ctor_deps']
+      with required keyword param names from def initialize(foo:). Each name is
+      camelized (logger -> Logger) and resolved.
+
+    Resolution uses the full-path index (exact or suffix match) with bare-name
+    fallback only when the name is unique. Keys not in key_map, names not
+    resolvable unambiguously, and self-injections are silently omitted (never
+    convention-guessed, never picked arbitrarily).
 
     Returns the number of DEPENDS_ON edges emitted.
     """
-    if not key_map:
-        return 0
-
     conn = store._conn
     cur = conn.cursor()
     emitted = 0
+
+    def _emit_depends_on(src_qn: str, target_qn: str, fp: str, edge_extra: dict) -> bool:
+        """Insert a DEPENDS_ON edge if an identical row does not already exist.
+        Returns True when a new edge was inserted (idempotent on re-run)."""
+        if not target_qn or target_qn == src_qn:
+            return False
+        existing = conn.execute(
+            "SELECT id FROM edges"
+            " WHERE kind='DEPENDS_ON' AND source_qualified=?"
+            "   AND target_qualified=? AND file_path=?",
+            (src_qn, target_qn, fp),
+        ).fetchone()
+        if existing is not None:
+            return False
+        cur.execute(
+            "INSERT INTO edges"
+            " (kind, source_qualified, target_qualified, file_path, line,"
+            "  confidence, confidence_tier, extra, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("DEPENDS_ON", src_qn, target_qn, fp, 0, 0.7, "INFERRED",
+             json.dumps(edge_extra), time.time()),
+        )
+        return True
 
     for row in conn.execute(
         "SELECT qualified_name, file_path, extra FROM nodes"
@@ -280,10 +315,13 @@ def _resolve_di_imports(
     ).fetchall():
         extra = json.loads(row["extra"] or "{}")
         di_keys: list[str] = extra.get("di_keys", [])
-        if not di_keys:
+        ctor_deps: list[str] = extra.get("ctor_deps", [])
+        if not di_keys and not ctor_deps:
             continue
         src_qn: str = row["qualified_name"]
         fp: str = row["file_path"]
+
+        # dry-auto_inject keys.
         for key in di_keys:
             const_name = key_map.get(key)
             if const_name is None:
@@ -291,22 +329,23 @@ def _resolve_di_imports(
             target_qn = _resolve_const_to_node(const_name, full_path_to_qn, bare_name_to_qns)
             if target_qn is None:
                 continue
-            edge_extra = json.dumps({"confidence_tier": "INFERRED", "di_key": key})
-            existing = conn.execute(
-                "SELECT id FROM edges"
-                " WHERE kind='DEPENDS_ON' AND source_qualified=?"
-                "   AND target_qualified=? AND file_path=?",
-                (src_qn, target_qn, fp),
-            ).fetchone()
-            if existing is None:
-                cur.execute(
-                    "INSERT INTO edges"
-                    " (kind, source_qualified, target_qualified, file_path, line,"
-                    "  confidence, confidence_tier, extra, updated_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    ("DEPENDS_ON", src_qn, target_qn, fp, 0, 0.7, "INFERRED",
-                     edge_extra, time.time()),
-                )
+            if _emit_depends_on(
+                src_qn, target_qn, fp,
+                {"confidence_tier": "INFERRED", "di_kind": "import", "di_key": key},
+            ):
+                emitted += 1
+
+        # Constructor injection: required keyword params -> camelized constant.
+        for param in ctor_deps:
+            target_qn = _resolve_const_to_node(
+                _snake_to_camel(param), full_path_to_qn, bare_name_to_qns
+            )
+            if target_qn is None:
+                continue
+            if _emit_depends_on(
+                src_qn, target_qn, fp,
+                {"confidence_tier": "INFERRED", "di_kind": "ctor", "ctor_param": param},
+            ):
                 emitted += 1
 
     return emitted
@@ -358,14 +397,15 @@ def resolve_ruby_cross_module(store: "GraphStore") -> dict:
             const_to_qn[nm] = qn
             rank_map[nm] = rank
 
-    # DI container key -> constant resolution (dry-auto_inject)
+    # DI resolution: dry-auto_inject container imports AND constructor injection.
+    # Runs unconditionally — ctor injection needs no Dry::Container, so the const
+    # indexes are always built and _resolve_di_imports handles an empty key_map.
     try:
         container_key_map = _build_container_key_map(files)
-        if container_key_map:
-            full_path_to_qn, bare_name_to_qns = _build_di_const_indexes(conn)
-            stats["di_edges_emitted"] = _resolve_di_imports(
-                store, container_key_map, full_path_to_qn, bare_name_to_qns
-            )
+        full_path_to_qn, bare_name_to_qns = _build_di_const_indexes(conn)
+        stats["di_edges_emitted"] = _resolve_di_imports(
+            store, container_key_map, full_path_to_qn, bare_name_to_qns
+        )
     except Exception:
         logger.exception("ruby_resolver: DI resolution failed")
 

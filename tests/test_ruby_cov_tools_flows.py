@@ -615,3 +615,107 @@ def test_embeddings_node_to_text_includes_rails_metadata(tmp_path):
     assert "Trackable" in text  # mixins
     assert "has_many" in text  # associations
     assert "recent" in text  # rails_scopes
+
+
+# ---------------------------------------------------------------------------
+# query_graph: dependents_of (INCOMING DEPENDS_ON — who injects this service)
+# ---------------------------------------------------------------------------
+
+
+def _di_app(tmp_path: Path) -> str:
+    """A dry-auto_inject app: a container registers 'core.logger' -> Logging::Logger,
+    and Svc injects it via include App::Import['core.logger']. Returns the
+    qualified name of the Logging::Logger service node."""
+    _init_repo(tmp_path)
+    _write(
+        tmp_path,
+        "lib/container.rb",
+        "class Container\n"
+        "  include Dry::Container::Mixin\n"
+        "  register('core.logger') { Logging::Logger.new }\n"
+        "end\n",
+    )
+    _write(
+        tmp_path,
+        "app/logging_logger.rb",
+        "module Logging\n  class Logger; end\nend\n",
+    )
+    _write(
+        tmp_path,
+        "app/svc.rb",
+        "class Svc\n  include App::Import['core.logger']\nend\n",
+    )
+    return f"{tmp_path}/app/logging_logger.rb::Logging.Logger"
+
+
+def test_dependents_of_returns_injecting_class(tmp_path):
+    from code_review_graph.tools.query import query_graph
+
+    logger_qn = _di_app(tmp_path)
+    store = _build(tmp_path)
+    try:
+        res = query_graph(
+            pattern="dependents_of", target=logger_qn, repo_root=str(tmp_path)
+        )
+    finally:
+        store.close()
+
+    assert res["status"] == "ok"
+    names = {r.get("name") or r.get("qualified_name") for r in res["results"]}
+    assert "Svc" in names, f"expected Svc to inject Logging::Logger, got {res['results']}"
+    dep_edges = [e for e in res["edges"] if e["kind"] == "DEPENDS_ON"]
+    assert dep_edges, f"expected a DEPENDS_ON edge, got {res['edges']}"
+    e = dep_edges[0]
+    assert e["target"] == logger_qn
+    assert e["source"].endswith("::Svc")
+    svc_result = next(r for r in res["results"] if (r.get("name") == "Svc"))
+    assert svc_result["confidence_tier"] == "INFERRED"
+    assert svc_result.get("di_key") == "core.logger"
+
+
+def test_dependents_of_empty_for_service_with_no_dependents(tmp_path):
+    from code_review_graph.tools.query import query_graph
+
+    _init_repo(tmp_path)
+    _write(tmp_path, "app/lonely.rb", "class Lonely; end\n")
+    store = _build(tmp_path)
+    try:
+        res = query_graph(
+            pattern="dependents_of",
+            target=f"{tmp_path}/app/lonely.rb::Lonely",
+            repo_root=str(tmp_path),
+        )
+    finally:
+        store.close()
+
+    assert res["status"] == "ok"
+    assert res["results"] == []
+    assert "Found 0 result(s)" in res["summary"]
+
+
+def test_dependents_of_is_reverse_of_dependencies_of(tmp_path):
+    """dependents_of(Logger) must contain Svc iff dependencies_of(Svc) contains
+    Logger — the two patterns are exact inverses over the DEPENDS_ON edge."""
+    from code_review_graph.tools.query import query_graph
+
+    logger_qn = _di_app(tmp_path)
+    svc_qn = f"{tmp_path}/app/svc.rb::Svc"
+    store = _build(tmp_path)
+    try:
+        forward = query_graph(
+            pattern="dependencies_of", target=svc_qn, repo_root=str(tmp_path)
+        )
+        reverse = query_graph(
+            pattern="dependents_of", target=logger_qn, repo_root=str(tmp_path)
+        )
+    finally:
+        store.close()
+
+    fwd_targets = {
+        e["target"] for e in forward["edges"] if e["kind"] == "DEPENDS_ON"
+    }
+    rev_sources = {
+        e["source"] for e in reverse["edges"] if e["kind"] == "DEPENDS_ON"
+    }
+    assert logger_qn in fwd_targets, forward["edges"]
+    assert svc_qn in rev_sources, reverse["edges"]

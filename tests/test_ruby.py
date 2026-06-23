@@ -1166,3 +1166,137 @@ def test_concern_not_emitted_as_extends(tmp_path):
     assert module_node.extra.get("rails_role") is None, (
         f"Plain Concern module should not be stamped with rails_role, got: {module_node.extra}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Constructor injection: def initialize(foo:) -> DEPENDS_ON (di_kind == "ctor")
+# ---------------------------------------------------------------------------
+
+
+def _ctor_build_conn(tmp_path):
+    import sqlite3
+
+    from code_review_graph.graph import GraphStore
+    from code_review_graph.incremental import full_build
+
+    (tmp_path / ".git").mkdir(exist_ok=True)
+    (tmp_path / ".code-review-graph").mkdir(exist_ok=True)
+    s = GraphStore(str(tmp_path / ".code-review-graph" / "graph.db"))
+    full_build(tmp_path, s)
+    conn = sqlite3.connect(str(tmp_path / ".code-review-graph" / "graph.db"))
+    conn.row_factory = sqlite3.Row
+    return s, conn
+
+
+def test_ctor_injection_creates_depends_on_edge(tmp_path):
+    """A class with `def initialize(logger:)` and a unique class Logger in the
+    repo gets a DEPENDS_ON Svc -> Logger edge, tier INFERRED, di_kind == 'ctor'.
+    """
+    (tmp_path / "app").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "app" / "logger.rb").write_text("class Logger; end\n")
+    (tmp_path / "app" / "svc.rb").write_text(
+        "class Svc\n  def initialize(logger:)\n    @logger = logger\n  end\nend\n"
+    )
+    _s, conn = _ctor_build_conn(tmp_path)
+    rows = conn.execute(
+        "SELECT source_qualified, target_qualified, confidence_tier, extra"
+        " FROM edges WHERE kind='DEPENDS_ON'"
+    ).fetchall()
+
+    ctor = [r for r in rows if (json.loads(r["extra"] or "{}").get("di_kind") == "ctor")]
+    assert len(ctor) == 1, f"expected exactly one ctor DEPENDS_ON edge, got: {[dict(r) for r in rows]}"
+    e = ctor[0]
+    assert e["source_qualified"].endswith("::Svc")
+    assert e["target_qualified"].endswith("::Logger")
+    assert e["confidence_tier"] == "INFERRED"
+
+
+def test_dependents_of_finds_ctor_injector(tmp_path):
+    """dependents_of(Logger) surfaces a constructor-injecting class with di_kind 'ctor'."""
+    from code_review_graph.tools.query import query_graph
+
+    (tmp_path / "app").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "app" / "logger.rb").write_text("class Logger; end\n")
+    (tmp_path / "app" / "svc.rb").write_text(
+        "class Svc\n  def initialize(logger:)\n    @logger = logger\n  end\nend\n"
+    )
+    s, _conn = _ctor_build_conn(tmp_path)
+    try:
+        res = query_graph(
+            pattern="dependents_of",
+            target=f"{tmp_path}/app/logger.rb::Logger",
+            repo_root=str(tmp_path),
+        )
+    finally:
+        s.close()
+
+    svc = [r for r in res["results"] if (r.get("name") == "Svc")]
+    assert svc, f"expected Svc as a dependent of Logger, got {res['results']}"
+    assert svc[0].get("di_kind") == "ctor"
+
+
+def test_ctor_injection_collision_bare_name_not_resolved(tmp_path):
+    """Two classes named Logger in different namespaces -> ctor `logger:` is
+    ambiguous -> NO DEPENDS_ON edge (never guesses)."""
+    (tmp_path / "app").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "app" / "a_logger.rb").write_text("module A\n  class Logger; end\nend\n")
+    (tmp_path / "app" / "b_logger.rb").write_text("module B\n  class Logger; end\nend\n")
+    (tmp_path / "app" / "svc.rb").write_text(
+        "class Svc\n  def initialize(logger:)\n    @logger = logger\n  end\nend\n"
+    )
+    _s, conn = _ctor_build_conn(tmp_path)
+    rows = conn.execute(
+        "SELECT target_qualified, extra FROM edges WHERE kind='DEPENDS_ON'"
+    ).fetchall()
+    ctor = [r for r in rows if (json.loads(r["extra"] or "{}").get("di_kind") == "ctor")]
+    assert len(ctor) == 0, (
+        f"ambiguous bare Logger must NOT create a ctor DEPENDS_ON edge; got: "
+        f"{[r['target_qualified'] for r in ctor]}"
+    )
+
+
+def test_ctor_injection_ignores_positional_splat_and_default_kwargs(tmp_path):
+    """Only required keyword params resolve. Positional `plain`, splat `*rest`,
+    double-splat `**opts`, and DEFAULTED kwarg `count: 5` must not create edges;
+    only the required `logger:` does."""
+    (tmp_path / "app").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "app" / "logger.rb").write_text("class Logger; end\n")
+    (tmp_path / "app" / "count.rb").write_text("class Count; end\n")
+    (tmp_path / "app" / "plain.rb").write_text("class Plain; end\n")
+    (tmp_path / "app" / "svc.rb").write_text(
+        "class Svc\n"
+        "  def initialize(plain, logger:, count: 5, *rest, **opts)\n"
+        "    @logger = logger\n"
+        "  end\n"
+        "end\n"
+    )
+    _s, conn = _ctor_build_conn(tmp_path)
+    rows = conn.execute(
+        "SELECT target_qualified, extra FROM edges WHERE kind='DEPENDS_ON'"
+    ).fetchall()
+    ctor_targets = [
+        r["target_qualified"] for r in rows
+        if json.loads(r["extra"] or "{}").get("di_kind") == "ctor"
+    ]
+    assert any(t.endswith("::Logger") for t in ctor_targets), ctor_targets
+    assert not any(t.endswith("::Count") for t in ctor_targets), (
+        f"defaulted kwarg `count: 5` must not create an edge; got {ctor_targets}"
+    )
+    assert not any(t.endswith("::Plain") for t in ctor_targets), (
+        f"positional param `plain` must not create an edge; got {ctor_targets}"
+    )
+
+
+def test_ctor_injection_no_initialize_no_edge(tmp_path):
+    """A class with a parameterless `def initialize; end` produces no ctor edge."""
+    (tmp_path / "app").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "app" / "logger.rb").write_text("class Logger; end\n")
+    (tmp_path / "app" / "svc.rb").write_text(
+        "class Svc\n  def initialize\n    @x = 1\n  end\nend\n"
+    )
+    _s, conn = _ctor_build_conn(tmp_path)
+    rows = conn.execute(
+        "SELECT extra FROM edges WHERE kind='DEPENDS_ON'"
+    ).fetchall()
+    ctor = [r for r in rows if json.loads(r["extra"] or "{}").get("di_kind") == "ctor"]
+    assert len(ctor) == 0, f"no ctor edge expected, got {len(ctor)}"

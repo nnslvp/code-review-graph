@@ -32,6 +32,7 @@ _QUERY_PATTERNS = {
     "associations_of": "ActiveRecord associations of a model",
     "delegations_of": "methods delegated by a class via `delegate`",
     "dependencies_of": "DI-injected dependencies of a class (dry-auto_inject)",
+    "dependents_of": "classes that inject a given service via DI (reverse of dependencies_of)",
     "file_summary": "Get a summary of all nodes in a file",
 }
 
@@ -158,7 +159,7 @@ def query_graph(
         pattern: Query pattern. One of: callers_of, callees_of, imports_of,
                  importers_of, children_of, tests_for, inheritors_of,
                  mixins_of, associations_of, delegations_of, dependencies_of,
-                 file_summary.
+                 dependents_of, file_summary.
         target: The node name, qualified name, or file path to query about.
         repo_root: Repository root path. Auto-detected if omitted.
         detail_level: "standard" (full output) or "minimal" (summary only).
@@ -456,6 +457,25 @@ def query_graph(
                         if "::" not in e.target_qualified:
                             d["unresolved"] = True
                         results.append(d)
+                    edges_out.append(edge_to_dict(e))
+
+        elif pattern == "dependents_of":
+            for e in store.get_edges_by_target(qn):
+                if e.kind == "DEPENDS_ON":
+                    dependent = store.get_node(e.source_qualified)
+                    extra_e = e.extra or {}
+                    if dependent:
+                        d = node_to_dict(dependent)
+                    else:
+                        d = {"qualified_name": e.source_qualified}
+                        if "::" not in e.source_qualified:
+                            d["unresolved"] = True
+                    d["confidence_tier"] = e.confidence_tier
+                    if "di_key" in extra_e:
+                        d["di_key"] = extra_e["di_key"]
+                    if "di_kind" in extra_e:
+                        d["di_kind"] = extra_e["di_kind"]
+                    results.append(d)
                     edges_out.append(edge_to_dict(e))
 
         elif pattern == "file_summary":
