@@ -1050,6 +1050,18 @@ class CodeParser:
         # Resolve bare call targets to qualified names using same-file definitions
         edges = self._resolve_call_targets(nodes, edges, file_path_str)
 
+        # Ruby test bodies emit only noise as CALLS edges: RSpec example bodies are
+        # dominated by DSL/matchers (let/expect/build/eq/described_class) that are
+        # not method-to-method calls in repo code. Ruby coverage comes from
+        # describe-based TESTED_BY (emitted in _extract_ruby_constructs), not from
+        # these CALLS, so dropping them loses no signal — it only removes noise that
+        # bloats the graph and inflates calls_unresolved. Gate on the presence of
+        # actual RSpec constructs (Test nodes), not the path-based test_file flag:
+        # a plain Ruby file living under a test/fixtures path is still production
+        # code (e.g. parser fixtures) and must keep its CALLS edges.
+        if language == "ruby" and any(n.kind == "Test" for n in nodes):
+            edges = [e for e in edges if e.kind != "CALLS"]
+
         # Generate TESTED_BY edges: source=test, target=prod.
         # When a test function calls a production function, emit an edge
         # from the test (source) to the production function (target) so that

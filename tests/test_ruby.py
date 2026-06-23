@@ -1300,3 +1300,53 @@ def test_ctor_injection_no_initialize_no_edge(tmp_path):
     ).fetchall()
     ctor = [r for r in rows if json.loads(r["extra"] or "{}").get("di_kind") == "ctor"]
     assert len(ctor) == 0, f"no ctor edge expected, got {len(ctor)}"
+
+
+# ---------------------------------------------------------------------------
+# Test-body CALLS noise: Ruby spec bodies must not emit CALLS edges
+# (RSpec DSL/matchers are noise; coverage comes from describe-based TESTED_BY)
+# ---------------------------------------------------------------------------
+
+
+def test_ruby_spec_body_emits_no_calls_edges(tmp_path):
+    """A Ruby spec produces zero CALLS edges (RSpec DSL noise), while keeping
+    Test nodes and the describe-based TESTED_BY edge to the described class."""
+    spec = tmp_path / "calc_spec.rb"
+    spec.write_text(
+        "RSpec.describe Calc do\n"
+        "  let(:calc) { described_class.new }\n"
+        "  it 'adds' do\n"
+        "    result = Calc.new.add(1, 2)\n"
+        "    expect(result).to eq(3)\n"
+        "  end\n"
+        "end\n"
+    )
+    nodes, edges = CodeParser(tmp_path).parse_file(spec)
+
+    calls = [e for e in edges if e.kind == "CALLS"]
+    assert calls == [], f"spec body must emit no CALLS edges, got: {[e.target for e in calls]}"
+
+    tested_by = [e for e in edges if e.kind == "TESTED_BY"]
+    assert any(e.target == "Calc" for e in tested_by), (
+        f"describe-based TESTED_BY -> Calc must survive, got: {[e.target for e in tested_by]}"
+    )
+    assert sum(1 for n in nodes if n.is_test) >= 1, "Test nodes must survive"
+
+
+def test_ruby_production_file_keeps_calls_edges(tmp_path):
+    """Regression: a non-test Ruby file with the same call shapes still emits
+    CALLS edges — the suppression is scoped to test files only."""
+    prod = tmp_path / "calc.rb"
+    prod.write_text(
+        "class Calc\n"
+        "  def run\n"
+        "    add(1, 2)\n"
+        "    helper\n"
+        "  end\n"
+        "  def add(a, b); a + b; end\n"
+        "  def helper; end\n"
+        "end\n"
+    )
+    nodes, edges = CodeParser(tmp_path).parse_file(prod)
+    calls = [e for e in edges if e.kind == "CALLS"]
+    assert calls, "production Ruby file must still emit CALLS edges"
